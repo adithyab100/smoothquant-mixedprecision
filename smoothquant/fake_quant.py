@@ -56,50 +56,52 @@ class W4A4Linear(nn.Module):
         importance = None,
         salient_prop = None,
     ):
-        super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
+      super().__init__()
+      self.in_features = in_features
+      self.out_features = out_features
 
-        self.register_buffer(
-            "weight",
-            torch.randn(
-                self.out_features,
-                self.in_features,
-                dtype=torch.float16,
-                requires_grad=False,
-            ),
-        )
-        if bias:
-            self.register_buffer(
-                "bias",
-                torch.zeros(
-                    (1, self.out_features), dtype=torch.float16, requires_grad=False
-                ),
-            )
-        else:
-            self.register_buffer("bias", None)
+      self.register_buffer(
+          "weight",
+          torch.randn(
+              self.out_features,
+              self.in_features,
+              dtype=torch.float16,
+              requires_grad=False,
+          ),
+      )
+      if bias:
+          self.register_buffer(
+              "bias",
+              torch.zeros(
+                  (1, self.out_features), dtype=torch.float16, requires_grad=False
+              ),
+          )
+      else:
+          self.register_buffer("bias", None)
 
-        if act_quant == "per_token":
-            self.act_quant_name = "per_token"
-            self.act_quant = partial(quantize_activation_per_token_absmax, n_bits=4)
-        elif act_quant == "per_tensor":
-            self.act_quant_name = "per_tensor"
-            self.act_quant = partial(quantize_activation_per_tensor_absmax, n_bits=4)
-        else:
-            raise ValueError(f"Invalid act_quant: {act_quant}")
+      if act_quant == "per_token":
+          self.act_quant_name = "per_token"
+          self.act_quant = partial(quantize_activation_per_token_absmax, n_bits=4)
+      elif act_quant == "per_tensor":
+          self.act_quant_name = "per_tensor"
+          self.act_quant = partial(quantize_activation_per_tensor_absmax, n_bits=4)
+      else:
+          raise ValueError(f"Invalid act_quant: {act_quant}")
 
-        if quantize_output:
-            self.output_quant_name = self.act_quant_name
-            self.output_quant = self.act_quant
-        else:
-            self.output_quant_name = "None"
-            self.output_quant = lambda x: x
-        
-        self.salient_indices = None
-        if salient_prop is not None:
-            self.salient_indices = torch.topk(importance, int(salient_prop*importance.size(0)))[1]
-            print(self.salient_indices)
-            raise NotImplementedError
+      if quantize_output:
+          self.output_quant_name = self.act_quant_name
+          self.output_quant = self.act_quant
+      else:
+          self.output_quant_name = "None"
+          self.output_quant = lambda x: x
+      
+      self.salient_indices = None
+
+      if importance is not None and salient_prop is not None:
+        # print("SKIBIDI")
+        self.salient_indices = torch.topk(importance, int(salient_prop*importance.size(0)))[1]
+        # print(self.salient_indices)
+        # raise NotImplementedError
 
     def to(self, *args, **kwargs):
         super(W4A4Linear, self).to(*args, **kwargs)
@@ -145,7 +147,7 @@ class W4A4Linear(nn.Module):
         return new_module
 
     def __repr__(self):
-        return f"W4A4Linear({self.in_features}, {self.out_features}, bias={self.bias is not None}, weight_quant={self.weight_quant_name}, act_quant={self.act_quant_name}, output_quant={self.output_quant_name})"
+        return f"W4A4Linear({self.in_features}, {self.out_features}, bias={self.bias is not None}, weight_quant={self.weight_quant_name}, act_quant={self.act_quant_name}, output_quant={self.output_quant_name}, salient_indices={self.salient_indices})"
 
 
 def quantize_opt(
@@ -157,17 +159,24 @@ def quantize_opt(
     )
 
     for name, m in model.model.named_modules():
-        if input_feat is not None:
-            importance = sum(input_feat[name]).float()
+        # importance = None
+
+        
         if isinstance(m, OPTDecoderLayer):
+            # if importance is not None:
+            #   print("SIGMA")
+            
+            importance = sum(input_feat['model.'+name+'.fc1']).float()
             m.fc1 = W4A4Linear.from_float(
                 m.fc1, weight_quant=weight_quant, act_quant=act_quant, importance = importance, salient_prop = salient_prop
             )
+            importance = sum(input_feat['model.'+name+'.fc2']).float()
             m.fc2 = W4A4Linear.from_float(
                 m.fc2, weight_quant=weight_quant, act_quant=act_quant, importance = importance, salient_prop = salient_prop
             )
         elif isinstance(m, OPTAttention):
             # Her we simulate quantizing BMM inputs by quantizing the output of q_proj, k_proj, v_proj
+            importance = sum(input_feat['model.'+name+'.q_proj']).float()
             m.q_proj = W4A4Linear.from_float(
                 m.q_proj,
                 weight_quant=weight_quant,
@@ -176,6 +185,7 @@ def quantize_opt(
                 importance = importance,
                 salient_prop = salient_prop
             )
+            importance = sum(input_feat['model.'+name+'.k_proj']).float()
             m.k_proj = W4A4Linear.from_float(
                 m.k_proj,
                 weight_quant=weight_quant,
@@ -184,6 +194,7 @@ def quantize_opt(
                 importance = importance,
                 salient_prop = salient_prop
             )
+            importance = sum(input_feat['model.'+name+'.v_proj']).float()
             m.v_proj = W4A4Linear.from_float(
                 m.v_proj,
                 weight_quant=weight_quant,
@@ -192,9 +203,11 @@ def quantize_opt(
                 importance = importance,
                 salient_prop = salient_prop
             )
+            importance = sum(input_feat['model.'+name+'.out_proj']).float()
             m.out_proj = W4A4Linear.from_float(
                 m.out_proj, weight_quant=weight_quant, act_quant=act_quant, importance = importance, salient_prop = salient_prop
             )
+            # print("OHIO")
     return model
 
 
