@@ -44,6 +44,25 @@ def quantize_activation_per_tensor_absmax(t, n_bits=4):
     t.div_(scales).round_().mul_(scales)
     return t
 
+def quantize_gradients_hook(grad, salient_indices=None, n_bits=4):
+    """
+    A hook to quantize the gradients during backpropagation, applying quantization only to non-salient gradients.
+    Salient gradients are preserved in full precision.
+    """
+    if salient_indices is not None:
+        # Make a copy of the gradients to avoid modifying the original tensor in-place
+        grad = grad.clone()
+
+        # Set gradients of the salient indices to zero or preserve them
+        grad[salient_indices] = grad[salient_indices]  # Preserve the gradients for salient indices
+
+        # Quantize the non-salient gradients
+        non_salient_indices = torch.setdiff1d(torch.arange(grad.size(0)), salient_indices)
+        grad[non_salient_indices] = grad[non_salient_indices] / (2 ** (n_bits - 1) - 1)
+        grad[non_salient_indices] = grad[non_salient_indices].round()
+
+    return grad
+
 
 class W4A4Linear(nn.Module):
     def __init__(
@@ -115,6 +134,11 @@ class W4A4Linear(nn.Module):
         q_x = self.act_quant(x)
         y = torch.functional.F.linear(q_x, self.weight, self.bias)
         q_y = self.output_quant(y)
+
+        # apply backward gradient quantization only for non-salient indices
+        if self.training and self.salient_indices is not None:
+            q_y.register_hook(partial(quantize_gradients_hook, salient_indices=self.salient_indices, n_bits=4))
+            
         return q_y
 
     @staticmethod
