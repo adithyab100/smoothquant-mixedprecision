@@ -131,6 +131,7 @@ class W4A4Linear(nn.Module):
             importance = importance,
             salient_prop = salient_prop
         )
+        outlier_weights = new_module.weight.data[:, new_module.salient_indices].clone()
         if weight_quant == "per_channel":
             new_module.weight = quantize_weight_per_channel_absmax(
                 module.weight, n_bits=4
@@ -141,6 +142,7 @@ class W4A4Linear(nn.Module):
             )
         else:
             raise ValueError(f"Invalid weight_quant: {weight_quant}")
+        new_module.weight.data[:, new_module.salient_indices] = outlier_weights
         new_module.weight_quant_name = weight_quant
         if module.bias is not None:
             new_module.bias = module.bias
