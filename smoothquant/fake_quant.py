@@ -121,6 +121,7 @@ class W4A4Linear(nn.Module):
         self.salient_indices = torch.topk(importance, int(salient_prop*importance.size(0)))[1]
         # print(self.salient_indices)
         # raise NotImplementedError
+        # print("FROM THE SCREEN TO THE RING TO PEN TO THE KING ", len(self.salient_indices), self.in_features, self.out_features)
 
     def to(self, *args, **kwargs):
         super(W4A4Linear, self).to(*args, **kwargs)
@@ -131,7 +132,12 @@ class W4A4Linear(nn.Module):
 
     @torch.no_grad()
     def forward(self, x):
+        x.view(-1, x.shape[-1])
+        x_salient = x[:, self.salient_indices].clone()
         q_x = self.act_quant(x)
+        # preserve salient activations
+        q_x[:, self.salient_indices] = x_salient
+
         y = torch.functional.F.linear(q_x, self.weight, self.bias)
         q_y = self.output_quant(y)
 
@@ -166,7 +172,11 @@ class W4A4Linear(nn.Module):
             )
         else:
             raise ValueError(f"Invalid weight_quant: {weight_quant}")
+        
+        outlier_weights = outlier_weights.to(new_module.weight.data.dtype).to(new_module.weight.data.device)
         new_module.weight.data[:, new_module.salient_indices] = outlier_weights
+        
+        # assert torch.equal(starting_weights.to(new_module.weight.data.device), new_module.weight.data), "MEWING"
         new_module.weight_quant_name = weight_quant
         if module.bias is not None:
             new_module.bias = module.bias
