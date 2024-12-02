@@ -136,7 +136,8 @@ class W4A4Linear(nn.Module):
         x_salient = x[:, self.salient_indices].clone()
         q_x = self.act_quant(x)
         # preserve salient activations
-        q_x[:, self.salient_indices] = x_salient
+        if self.salient_indices is not None:
+          q_x[:, self.salient_indices] = x_salient
 
         y = torch.functional.F.linear(q_x, self.weight, self.bias)
         q_y = self.output_quant(y)
@@ -174,8 +175,9 @@ class W4A4Linear(nn.Module):
             raise ValueError(f"Invalid weight_quant: {weight_quant}")
         
         outlier_weights = outlier_weights.to(new_module.weight.data.dtype).to(new_module.weight.data.device)
-        new_module.weight.data[:, new_module.salient_indices] = outlier_weights
-        
+        if new_module.salient_indices is not None:
+            new_module.weight.data[:, new_module.salient_indices] = outlier_weights
+
         # assert torch.equal(starting_weights.to(new_module.weight.data.device), new_module.weight.data), "MEWING"
         new_module.weight_quant_name = weight_quant
         if module.bias is not None:
