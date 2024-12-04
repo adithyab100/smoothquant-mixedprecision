@@ -2,6 +2,8 @@ import torch
 from torch import nn
 from functools import partial
 from tqdm import tqdm
+from scipy import stats
+import numpy as np
 
 
 @torch.no_grad()
@@ -100,6 +102,29 @@ def quantize_activation_per_group_absmax(t, n_bits, group_size=128):
     return t.view(t_shape)
 
 
+def compute_adaptive_salient_prop(importance, min_prop=0, max_prop=0):
+    """
+    Compute adaptive salient proportion based on importance skewness.
+    - High skewness (many low importance values) -> lower proportion
+    - Low skewness (more uniform importance) -> higher proportion
+    """
+    if importance is None:
+        return None
+        
+    # Calculate skewness of importance values
+    importance_np = importance.cpu().numpy()
+    skewness = stats.skew(importance_np)
+    
+    # Normalize skewness to [0, 1] range using sigmoid
+    normalized_skew = 1 / (1 + np.exp(-skewness))
+    
+    # Inverse relationship: high skew -> low proportion
+    prop = max_prop - (max_prop - min_prop) * normalized_skew
+    
+    # Ensure proportion is within bounds
+    return float(np.clip(prop, min_prop, max_prop))
+
+
 class W4A4Linear(nn.Module):
     def __init__(
         self,
@@ -112,6 +137,8 @@ class W4A4Linear(nn.Module):
         salient_prop=None,
         quant_bits=4,
         group_size=128,
+        min_prop=0,
+        max_prop=0,
     ):
         super().__init__()
         self.in_features = in_features
@@ -157,9 +184,10 @@ class W4A4Linear(nn.Module):
             self.output_quant = lambda x: x
 
         self.salient_indices = None
-
-        if importance is not None and salient_prop is not None:
-            self.salient_indices = torch.topk(importance, int(salient_prop * importance.size(0)))[1]
+        if importance is not None:
+            adaptive_prop = compute_adaptive_salient_prop(importance, min_prop=min_prop, max_prop=max_prop)
+            if adaptive_prop is not None:
+                self.salient_indices = torch.topk(importance, int(adaptive_prop * importance.size(0)))[1]
 
     def to(self, *args, **kwargs):
         super(W4A4Linear, self).to(*args, **kwargs)
@@ -215,7 +243,16 @@ class W4A4Linear(nn.Module):
 
     @staticmethod
     def from_float(
-        module, weight_quant="per_channel", act_quant="per_token", quantize_output=False, importance=None, salient_prop=None, quant_bits=4, group_size=128
+        module, 
+        weight_quant="per_channel", 
+        act_quant="per_token", 
+        quantize_output=False, 
+        importance=None, 
+        salient_prop=None, 
+        quant_bits=4, 
+        group_size=128,
+        min_prop=0,
+        max_prop=0,
     ):
         assert isinstance(module, torch.nn.Linear)
         new_module = W4A4Linear(
@@ -228,6 +265,8 @@ class W4A4Linear(nn.Module):
             salient_prop=salient_prop,
             quant_bits=quant_bits,
             group_size=group_size,
+            min_prop=min_prop,
+            max_prop=max_prop,
         )
         outlier_weights = module.weight.data[:, new_module.salient_indices].clone()
         if weight_quant == "per_channel":
@@ -260,8 +299,18 @@ class W4A4Linear(nn.Module):
 
 
 def quantize_opt(
-    model, weight_quant="per_tensor", act_quant="per_tensor", quantize_bmm_input=True, input_feat=None, salient_prop=None, quant_bits=4, group_size=128
+    model, 
+    weight_quant="per_tensor", 
+    act_quant="per_tensor", 
+    quantize_bmm_input=True, 
+    input_feat=None, 
+    salient_prop=None, 
+    quant_bits=4, 
+    group_size=128,
+    min_prop=0,
+    max_prop=0,
 ):
+    max_prop = max(min_prop, max_prop)
     from transformers.models.opt.modeling_opt import (
         OPTAttention,
         OPTDecoderLayer,
@@ -273,14 +322,30 @@ def quantize_opt(
         if isinstance(m, OPTDecoderLayer):
             importance = sum(input_feat["model." + name + ".fc1"]).float()
             m.fc1 = W4A4Linear.from_float(
-                m.fc1, weight_quant=weight_quant, act_quant=act_quant, importance=importance, salient_prop=salient_prop, quant_bits=quant_bits, group_size=group_size
+                m.fc1, 
+                weight_quant=weight_quant, 
+                act_quant=act_quant, 
+                importance=importance, 
+                salient_prop=salient_prop, 
+                quant_bits=quant_bits, 
+                group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
             importance = sum(input_feat["model." + name + ".fc2"]).float()
             m.fc2 = W4A4Linear.from_float(
-                m.fc2, weight_quant=weight_quant, act_quant=act_quant, importance=importance, salient_prop=salient_prop, quant_bits=quant_bits, group_size=group_size
+                m.fc2, 
+                weight_quant=weight_quant, 
+                act_quant=act_quant, 
+                importance=importance, 
+                salient_prop=salient_prop, 
+                quant_bits=quant_bits, 
+                group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
         elif isinstance(m, OPTAttention):
-            # Her we simulate quantizing BMM inputs by quantizing the output of q_proj, k_proj, v_proj
+            # Here we simulate quantizing BMM inputs by quantizing the output of q_proj, k_proj, v_proj
             importance = sum(input_feat["model." + name + ".q_proj"]).float()
             m.q_proj = W4A4Linear.from_float(
                 m.q_proj,
@@ -290,7 +355,9 @@ def quantize_opt(
                 importance=importance,
                 salient_prop=salient_prop,
                 quant_bits=quant_bits,
-                group_size=group_size
+                group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
             importance = sum(input_feat["model." + name + ".k_proj"]).float()
             m.k_proj = W4A4Linear.from_float(
@@ -301,7 +368,9 @@ def quantize_opt(
                 importance=importance,
                 salient_prop=salient_prop,
                 quant_bits=quant_bits,
-                group_size=group_size
+                group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
             importance = sum(input_feat["model." + name + ".v_proj"]).float()
             m.v_proj = W4A4Linear.from_float(
@@ -312,11 +381,21 @@ def quantize_opt(
                 importance=importance,
                 salient_prop=salient_prop,
                 quant_bits=quant_bits,
-                group_size=group_size
+                group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
             importance = sum(input_feat["model." + name + ".out_proj"]).float()
             m.out_proj = W4A4Linear.from_float(
-                m.out_proj, weight_quant=weight_quant, act_quant=act_quant, importance=importance, salient_prop=salient_prop, quant_bits=quant_bits, group_size=group_size
+                m.out_proj, 
+                weight_quant=weight_quant, 
+                act_quant=act_quant, 
+                importance=importance, 
+                salient_prop=salient_prop, 
+                quant_bits=quant_bits, 
+                group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
     return model
 
@@ -346,14 +425,14 @@ def quantize_llama_like(
                 m.down_proj, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits, group_size=group_size
             )
         elif isinstance(m, (LlamaAttention, MistralAttention)):
-            # Her we simulate quantizing BMM inputs by quantizing the output of q_proj, k_proj, v_proj
+            # Here we simulate quantizing BMM inputs by quantizing the output of q_proj, k_proj, v_proj
             m.q_proj = W4A4Linear.from_float(
                 m.q_proj,
                 weight_quant=weight_quant,
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
                 quant_bits=quant_bits,
-                group_size=group_size
+                group_size=group_size,
             )
             m.k_proj = W4A4Linear.from_float(
                 m.k_proj,
@@ -361,7 +440,7 @@ def quantize_llama_like(
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
                 quant_bits=quant_bits,
-                group_size=group_size
+                group_size=group_size,
             )
             m.v_proj = W4A4Linear.from_float(
                 m.v_proj,
@@ -369,7 +448,7 @@ def quantize_llama_like(
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
                 quant_bits=quant_bits,
-                group_size=group_size
+                group_size=group_size,
             )
             m.o_proj = W4A4Linear.from_float(
                 m.o_proj, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits, group_size=group_size
@@ -398,14 +477,14 @@ def quantize_mixtral(
                 m.w3, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits, group_size=group_size
             )
         elif isinstance(m, MixtralAttention):
-            # Her we simulate quantizing BMM inputs by quantizing the output of q_proj, k_proj, v_proj
+            # Here we simulate quantizing BMM inputs by quantizing the output of q_proj, k_proj, v_proj
             m.q_proj = W4A4Linear.from_float(
                 m.q_proj,
                 weight_quant=weight_quant,
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
                 quant_bits=quant_bits,
-                group_size=group_size
+                group_size=group_size,
             )
             m.k_proj = W4A4Linear.from_float(
                 m.k_proj,
@@ -413,7 +492,7 @@ def quantize_mixtral(
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
                 quant_bits=quant_bits,
-                group_size=group_size
+                group_size=group_size,
             )
             m.v_proj = W4A4Linear.from_float(
                 m.v_proj,
@@ -421,7 +500,7 @@ def quantize_mixtral(
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
                 quant_bits=quant_bits,
-                group_size=group_size
+                group_size=group_size,
             )
             m.o_proj = W4A4Linear.from_float(
                 m.o_proj, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits, group_size=group_size
@@ -450,14 +529,14 @@ def quantize_falcon(
                 m.dense_4h_to_h, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits, group_size=group_size
             )
         elif isinstance(m, FalconAttention):
-            # Her we simulate quantizing BMM inputs by quantizing the output of q_proj, k_proj, v_proj
+            # Here we simulate quantizing BMM inputs by quantizing the output of q_proj, k_proj, v_proj
             m.query_key_value = W4A4Linear.from_float(
                 m.query_key_value,
                 weight_quant=weight_quant,
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
                 quant_bits=quant_bits,
-                group_size=group_size
+                group_size=group_size,
             )
             m.dense = W4A4Linear.from_float(
                 m.dense, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits, group_size=group_size
