@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 from functools import partial
+from tqdm import tqdm
 
 
 @torch.no_grad()
@@ -45,7 +46,7 @@ def quantize_activation_per_tensor_absmax(t, n_bits):
     return t
 
 
-def quantize_gradients_hook(grad, salient_indices=None, n_bits):
+def quantize_gradients_hook(grad, n_bits, salient_indices=None):
     """
     A hook to quantize the gradients during backpropagation, applying quantization only to non-salient gradients.
     Salient gradients are preserved in full precision.
@@ -149,7 +150,7 @@ class W4A4Linear(nn.Module):
         # apply backward gradient quantization only for non-salient indices
         if self.training and self.salient_indices is not None:
             q_y.register_hook(
-                partial(quantize_gradients_hook, salient_indices=self.salient_indices, n_bits=4)
+                partial(quantize_gradients_hook, n_bits=4, salient_indices=self.salient_indices)
             )
 
         return q_y
@@ -203,7 +204,7 @@ def quantize_opt(
         OPTDecoderLayer,
     )
 
-    for name, m in model.model.named_modules():
+    for name, m in tqdm(model.model.named_modules(), desc="Quantizing OPT model"):
         # importance = None
 
         if isinstance(m, OPTDecoderLayer):
