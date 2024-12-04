@@ -48,6 +48,58 @@ def quantize_activation_per_tensor_absmax(t, n_bits=QUANT_BITS):
     return t
 
 
+@torch.no_grad()
+def quantize_with_dual_scales(w, n_bits=QUANT_BITS, salient_indices=None):
+    """Quantize weights using separate scales for salient and non-salient weights"""
+    if salient_indices is None:
+        return quantize_weight_per_channel_absmax(w, n_bits)
+    
+    print("\n=== Quantization Debug Info ===")
+    print(f"Input weight stats: mean={w.mean():.6f}, std={w.std():.6f}, max={w.abs().max():.6f}")
+    print(f"Number of salient indices: {len(salient_indices)}")
+    
+    # Create masks for salient and non-salient weights
+    salient_mask = torch.zeros_like(w, dtype=torch.bool)
+    salient_mask[:, salient_indices] = True
+    
+    # Original salient weights stats
+    orig_salient = w[salient_mask].clone()
+    print(f"Original salient weights: mean={orig_salient.mean():.6f}, std={orig_salient.std():.6f}, max={orig_salient.abs().max():.6f}")
+    
+    # Handle non-salient weights with normal quantization
+    w_non_salient = w.clone()
+    w_non_salient[:, salient_indices] = 0
+    scales_non_salient = w_non_salient.abs().max(dim=-1, keepdim=True)[0]
+    q_max = 2 ** (n_bits - 1) - 1
+    scales_non_salient.clamp_(min=1e-5).div_(q_max)
+    w_non_salient.div_(scales_non_salient).round_().mul_(scales_non_salient)
+    
+    print(f"Quantized non-salient stats: mean={w_non_salient[~salient_mask].mean():.6f}, std={w_non_salient[~salient_mask].std():.6f}")
+    print(f"Non-salient scale mean: {scales_non_salient.mean():.6f}")
+    
+    # Handle salient weights - scale them to maintain relative importance
+    w_salient = w.clone()
+    w_salient[~salient_mask] = 0
+    # Scale salient weights relative to quantized scale
+    salient_max = w_salient.abs().max()
+    relative_scale = scales_non_salient.mean() / salient_max if salient_max > 0 else 1.0
+    w_salient.mul_(relative_scale)
+    
+    print(f"Salient max before scaling: {salient_max:.6f}")
+    print(f"Relative scale factor: {relative_scale:.6f}")
+    print(f"Scaled salient stats: mean={w_salient[salient_mask].mean():.6f}, std={w_salient[salient_mask].std():.6f}")
+    
+    # Combine both parts
+    result = w_salient + w_non_salient
+    print(f"Final combined stats: mean={result.mean():.6f}, std={result.std():.6f}")
+    print(f"Final salient stats: mean={result[salient_mask].mean():.6f}, std={result[salient_mask].std():.6f}")
+    print(f"Final non-salient stats: mean={result[~salient_mask].mean():.6f}, std={result[~salient_mask].std():.6f}")
+    print("==============================\n")
+    
+    return result
+
+
+@torch.no_grad()
 def quantize_gradients_hook(grad, salient_indices=None, n_bits=QUANT_BITS):
     """
     A hook to quantize the gradients during backpropagation, applying quantization only to non-salient gradients.
@@ -161,6 +213,8 @@ class W4A4Linear(nn.Module):
         module, weight_quant="per_channel", act_quant="per_token", quantize_output=False, importance=None, salient_prop=None
     ):
         assert isinstance(module, torch.nn.Linear)
+        print(f"\n=== Processing Layer: in_features={module.in_features}, out_features={module.out_features} ===")
+        
         new_module = W4A4Linear(
             module.in_features,
             module.out_features,
@@ -170,23 +224,19 @@ class W4A4Linear(nn.Module):
             importance=importance,
             salient_prop=salient_prop,
         )
-        outlier_weights = new_module.weight.data[:, new_module.salient_indices].clone()
-        if weight_quant == "per_channel":
-            new_module.weight = quantize_weight_per_channel_absmax(
-                module.weight, n_bits=QUANT_BITS
-            )  # use 4-bit integer for weight
-        elif weight_quant == "per_tensor":
-            new_module.weight = quantize_weight_per_tensor_absmax(
-                module.weight, n_bits=QUANT_BITS
-            )
-        else:
-            raise ValueError(f"Invalid weight_quant: {weight_quant}")
-
-        outlier_weights = outlier_weights.to(new_module.weight.data.dtype).to(new_module.weight.data.device)
-        if new_module.salient_indices is not None:
-            new_module.weight.data[:, new_module.salient_indices] = outlier_weights
-
-        # assert torch.equal(starting_weights.to(new_module.weight.data.device), new_module.weight.data), "MEWING"
+        
+        if importance is not None and salient_prop is not None:
+            print(f"Importance score range: {importance.min():.6f} to {importance.max():.6f}")
+            print(f"Salient proportion: {salient_prop}")
+            print(f"Number of salient indices: {len(new_module.salient_indices)}")
+        
+        # Quantize weights using dual scales if we have salient indices
+        new_module.weight = quantize_with_dual_scales(
+            module.weight, 
+            n_bits=QUANT_BITS,
+            salient_indices=new_module.salient_indices
+        )
+        
         new_module.weight_quant_name = weight_quant
         if module.bias is not None:
             new_module.bias = module.bias
