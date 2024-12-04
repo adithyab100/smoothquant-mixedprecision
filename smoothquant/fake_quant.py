@@ -46,26 +46,6 @@ def quantize_activation_per_tensor_absmax(t, n_bits):
     return t
 
 
-def quantize_gradients_hook(grad, n_bits, salient_indices=None):
-    """
-    A hook to quantize the gradients during backpropagation, applying quantization only to non-salient gradients.
-    Salient gradients are preserved in full precision.
-    """
-    if salient_indices is not None:
-        # Make a copy of the gradients to avoid modifying the original tensor in-place
-        grad = grad.clone()
-
-        # Set gradients of the salient indices to zero or preserve them
-        grad[salient_indices] = grad[salient_indices]  # Preserve the gradients for salient indices
-
-        # Quantize the non-salient gradients
-        non_salient_indices = torch.setdiff1d(torch.arange(grad.size(0)), salient_indices)
-        grad[non_salient_indices] = grad[non_salient_indices] / (2 ** (n_bits - 1) - 1)
-        grad[non_salient_indices] = grad[non_salient_indices].round()
-
-    return grad
-
-
 class W4A4Linear(nn.Module):
     def __init__(
         self,
@@ -120,13 +100,7 @@ class W4A4Linear(nn.Module):
         self.salient_indices = None
 
         if importance is not None and salient_prop is not None:
-            # print("SKIBIDI")
-            self.salient_indices = torch.topk(importance, int(salient_prop * importance.size(0)))[
-                1
-            ]
-            # print(self.salient_indices)
-            # raise NotImplementedError
-            # print("FROM THE SCREEN TO THE RING TO PEN TO THE KING ", len(self.salient_indices), self.in_features, self.out_features)
+            self.salient_indices = torch.topk(importance, int(salient_prop * importance.size(0)))[1]
 
     def to(self, *args, **kwargs):
         super(W4A4Linear, self).to(*args, **kwargs)
@@ -138,20 +112,34 @@ class W4A4Linear(nn.Module):
     @torch.no_grad()
     def forward(self, x):
         x.view(-1, x.shape[-1])
-        x_salient = x[:, self.salient_indices].clone()
-        q_x = self.act_quant(x)
-        # preserve salient activations
+        original_x = x.clone()
+        
         if self.salient_indices is not None:
-            q_x[:, self.salient_indices] = x_salient
+            # Create a mask for non-salient indices
+            non_salient_mask = torch.ones(x.shape[-1], dtype=torch.bool, device=x.device)
+            non_salient_mask[self.salient_indices] = False
+            
+            # Only quantize non-salient features
+            q_x = x.clone()
+            non_salient_x = x[:, non_salient_mask]
+            if non_salient_x.numel() > 0:  # Only quantize if there are non-salient features
+                quantized_non_salient = self.act_quant(non_salient_x)
+                q_x[:, non_salient_mask] = quantized_non_salient
+        else:
+            # If no salient indices specified, quantize everything
+            q_x = self.act_quant(x)
 
         y = torch.functional.F.linear(q_x, self.weight, self.bias)
-        q_y = self.output_quant(y)
-
-        # apply backward gradient quantization only for non-salient indices
-        if self.training and self.salient_indices is not None:
-            q_y.register_hook(
-                partial(quantize_gradients_hook, n_bits=4, salient_indices=self.salient_indices)
-            )
+        
+        # Only apply output quantization to non-salient features if needed
+        if self.output_quant_name != "None" and self.salient_indices is not None:
+            q_y = y.clone()
+            non_salient_y = y[:, non_salient_mask] if non_salient_mask.any() else None
+            if non_salient_y is not None and non_salient_y.numel() > 0:
+                quantized_non_salient_y = self.output_quant(non_salient_y)
+                q_y[:, non_salient_mask] = quantized_non_salient_y
+        else:
+            q_y = self.output_quant(y)
 
         return q_y
 
