@@ -2,12 +2,9 @@ import torch
 from torch import nn
 from functools import partial
 
-# Global quantization bits configuration
-QUANT_BITS = 4
-
 
 @torch.no_grad()
-def quantize_weight_per_channel_absmax(w, n_bits=QUANT_BITS):
+def quantize_weight_per_channel_absmax(w, n_bits):
     # w: (out_features, in_features)
     scales = w.abs().max(dim=-1, keepdim=True)[0]
     q_max = 2 ** (n_bits - 1) - 1
@@ -17,7 +14,7 @@ def quantize_weight_per_channel_absmax(w, n_bits=QUANT_BITS):
 
 
 @torch.no_grad()
-def quantize_weight_per_tensor_absmax(w, n_bits=QUANT_BITS):
+def quantize_weight_per_tensor_absmax(w, n_bits):
     # w: (out_features, in_features)
     scales = w.abs().max()
     q_max = 2 ** (n_bits - 1) - 1
@@ -27,7 +24,7 @@ def quantize_weight_per_tensor_absmax(w, n_bits=QUANT_BITS):
 
 
 @torch.no_grad()
-def quantize_activation_per_token_absmax(t, n_bits=QUANT_BITS):
+def quantize_activation_per_token_absmax(t, n_bits):
     t_shape = t.shape
     t.view(-1, t_shape[-1])
     scales = t.abs().max(dim=-1, keepdim=True)[0]
@@ -38,7 +35,7 @@ def quantize_activation_per_token_absmax(t, n_bits=QUANT_BITS):
 
 
 @torch.no_grad()
-def quantize_activation_per_tensor_absmax(t, n_bits=QUANT_BITS):
+def quantize_activation_per_tensor_absmax(t, n_bits):
     t_shape = t.shape
     t.view(-1, t_shape[-1])
     scales = t.abs().max()
@@ -48,7 +45,7 @@ def quantize_activation_per_tensor_absmax(t, n_bits=QUANT_BITS):
     return t
 
 
-def quantize_gradients_hook(grad, salient_indices=None, n_bits=QUANT_BITS):
+def quantize_gradients_hook(grad, salient_indices=None, n_bits):
     """
     A hook to quantize the gradients during backpropagation, applying quantization only to non-salient gradients.
     Salient gradients are preserved in full precision.
@@ -78,6 +75,7 @@ class W4A4Linear(nn.Module):
         quantize_output=False,
         importance=None,
         salient_prop=None,
+        quant_bits=4,
     ):
         super().__init__()
         self.in_features = in_features
@@ -104,10 +102,10 @@ class W4A4Linear(nn.Module):
 
         if act_quant == "per_token":
             self.act_quant_name = "per_token"
-            self.act_quant = partial(quantize_activation_per_token_absmax, n_bits=QUANT_BITS)
+            self.act_quant = partial(quantize_activation_per_token_absmax, n_bits=quant_bits)
         elif act_quant == "per_tensor":
             self.act_quant_name = "per_tensor"
-            self.act_quant = partial(quantize_activation_per_tensor_absmax, n_bits=QUANT_BITS)
+            self.act_quant = partial(quantize_activation_per_tensor_absmax, n_bits=quant_bits)
         else:
             raise ValueError(f"Invalid act_quant: {act_quant}")
 
@@ -151,14 +149,14 @@ class W4A4Linear(nn.Module):
         # apply backward gradient quantization only for non-salient indices
         if self.training and self.salient_indices is not None:
             q_y.register_hook(
-                partial(quantize_gradients_hook, salient_indices=self.salient_indices, n_bits=QUANT_BITS)
+                partial(quantize_gradients_hook, salient_indices=self.salient_indices, n_bits=4)
             )
 
         return q_y
 
     @staticmethod
     def from_float(
-        module, weight_quant="per_channel", act_quant="per_token", quantize_output=False, importance=None, salient_prop=None
+        module, weight_quant="per_channel", act_quant="per_token", quantize_output=False, importance=None, salient_prop=None, quant_bits=4
     ):
         assert isinstance(module, torch.nn.Linear)
         new_module = W4A4Linear(
@@ -169,15 +167,16 @@ class W4A4Linear(nn.Module):
             quantize_output=quantize_output,
             importance=importance,
             salient_prop=salient_prop,
+            quant_bits=quant_bits,
         )
-        outlier_weights = new_module.weight.data[:, new_module.salient_indices].clone()
+        outlier_weights = module.weight.data[:, new_module.salient_indices].clone()
         if weight_quant == "per_channel":
             new_module.weight = quantize_weight_per_channel_absmax(
-                module.weight, n_bits=QUANT_BITS
+                module.weight, n_bits=quant_bits
             )  # use 4-bit integer for weight
         elif weight_quant == "per_tensor":
             new_module.weight = quantize_weight_per_tensor_absmax(
-                module.weight, n_bits=QUANT_BITS
+                module.weight, n_bits=quant_bits
             )
         else:
             raise ValueError(f"Invalid weight_quant: {weight_quant}")
@@ -197,7 +196,7 @@ class W4A4Linear(nn.Module):
 
 
 def quantize_opt(
-    model, weight_quant="per_tensor", act_quant="per_tensor", quantize_bmm_input=True, input_feat=None, salient_prop=None
+    model, weight_quant="per_tensor", act_quant="per_tensor", quantize_bmm_input=True, input_feat=None, salient_prop=None, quant_bits=4
 ):
     from transformers.models.opt.modeling_opt import (
         OPTAttention,
@@ -210,11 +209,11 @@ def quantize_opt(
         if isinstance(m, OPTDecoderLayer):
             importance = sum(input_feat["model." + name + ".fc1"]).float()
             m.fc1 = W4A4Linear.from_float(
-                m.fc1, weight_quant=weight_quant, act_quant=act_quant, importance=importance, salient_prop=salient_prop
+                m.fc1, weight_quant=weight_quant, act_quant=act_quant, importance=importance, salient_prop=salient_prop, quant_bits=quant_bits
             )
             importance = sum(input_feat["model." + name + ".fc2"]).float()
             m.fc2 = W4A4Linear.from_float(
-                m.fc2, weight_quant=weight_quant, act_quant=act_quant, importance=importance, salient_prop=salient_prop
+                m.fc2, weight_quant=weight_quant, act_quant=act_quant, importance=importance, salient_prop=salient_prop, quant_bits=quant_bits
             )
         elif isinstance(m, OPTAttention):
             # Her we simulate quantizing BMM inputs by quantizing the output of q_proj, k_proj, v_proj
@@ -226,6 +225,7 @@ def quantize_opt(
                 quantize_output=quantize_bmm_input,
                 importance=importance,
                 salient_prop=salient_prop,
+                quant_bits=quant_bits
             )
             importance = sum(input_feat["model." + name + ".k_proj"]).float()
             m.k_proj = W4A4Linear.from_float(
@@ -235,6 +235,7 @@ def quantize_opt(
                 quantize_output=quantize_bmm_input,
                 importance=importance,
                 salient_prop=salient_prop,
+                quant_bits=quant_bits
             )
             importance = sum(input_feat["model." + name + ".v_proj"]).float()
             m.v_proj = W4A4Linear.from_float(
@@ -244,17 +245,17 @@ def quantize_opt(
                 quantize_output=quantize_bmm_input,
                 importance=importance,
                 salient_prop=salient_prop,
+                quant_bits=quant_bits
             )
             importance = sum(input_feat["model." + name + ".out_proj"]).float()
             m.out_proj = W4A4Linear.from_float(
-                m.out_proj, weight_quant=weight_quant, act_quant=act_quant, importance=importance, salient_prop=salient_prop
+                m.out_proj, weight_quant=weight_quant, act_quant=act_quant, importance=importance, salient_prop=salient_prop, quant_bits=quant_bits
             )
-            # print("OHIO")
     return model
 
 
 def quantize_llama_like(
-    model, weight_quant="per_channel", act_quant="per_token", quantize_bmm_input=False
+    model, weight_quant="per_channel", act_quant="per_token", quantize_bmm_input=False, quant_bits=4
 ):
     from transformers.models.llama.modeling_llama import (
         LlamaAttention,
@@ -269,13 +270,13 @@ def quantize_llama_like(
     for name, m in model.model.named_modules():
         if isinstance(m, (LlamaMLP, MistralMLP)):
             m.gate_proj = W4A4Linear.from_float(
-                m.gate_proj, weight_quant=weight_quant, act_quant=act_quant
+                m.gate_proj, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits
             )
             m.up_proj = W4A4Linear.from_float(
-                m.up_proj, weight_quant=weight_quant, act_quant=act_quant
+                m.up_proj, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits
             )
             m.down_proj = W4A4Linear.from_float(
-                m.down_proj, weight_quant=weight_quant, act_quant=act_quant
+                m.down_proj, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits
             )
         elif isinstance(m, (LlamaAttention, MistralAttention)):
             # Her we simulate quantizing BMM inputs by quantizing the output of q_proj, k_proj, v_proj
@@ -284,27 +285,30 @@ def quantize_llama_like(
                 weight_quant=weight_quant,
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
+                quant_bits=quant_bits
             )
             m.k_proj = W4A4Linear.from_float(
                 m.k_proj,
                 weight_quant=weight_quant,
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
+                quant_bits=quant_bits
             )
             m.v_proj = W4A4Linear.from_float(
                 m.v_proj,
                 weight_quant=weight_quant,
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
+                quant_bits=quant_bits
             )
             m.o_proj = W4A4Linear.from_float(
-                m.o_proj, weight_quant=weight_quant, act_quant=act_quant
+                m.o_proj, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits
             )
     return model
 
 
 def quantize_mixtral(
-    model, weight_quant="per_channel", act_quant="per_token", quantize_bmm_input=False
+    model, weight_quant="per_channel", act_quant="per_token", quantize_bmm_input=False, quant_bits=4
 ):
     from transformers.models.mixtral.modeling_mixtral import (
         MixtralAttention,
@@ -315,13 +319,13 @@ def quantize_mixtral(
     for name, m in model.model.named_modules():
         if isinstance(m, MixtralBLockSparseTop2MLP):
             m.w1 = W4A4Linear.from_float(
-                m.w1, weight_quant=weight_quant, act_quant=act_quant
+                m.w1, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits
             )
             m.w2 = W4A4Linear.from_float(
-                m.w2, weight_quant=weight_quant, act_quant=act_quant
+                m.w2, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits
             )
             m.w3 = W4A4Linear.from_float(
-                m.w3, weight_quant=weight_quant, act_quant=act_quant
+                m.w3, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits
             )
         elif isinstance(m, MixtralAttention):
             # Her we simulate quantizing BMM inputs by quantizing the output of q_proj, k_proj, v_proj
@@ -330,31 +334,34 @@ def quantize_mixtral(
                 weight_quant=weight_quant,
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
+                quant_bits=quant_bits
             )
             m.k_proj = W4A4Linear.from_float(
                 m.k_proj,
                 weight_quant=weight_quant,
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
+                quant_bits=quant_bits
             )
             m.v_proj = W4A4Linear.from_float(
                 m.v_proj,
                 weight_quant=weight_quant,
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
+                quant_bits=quant_bits
             )
             m.o_proj = W4A4Linear.from_float(
-                m.o_proj, weight_quant=weight_quant, act_quant=act_quant
+                m.o_proj, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits
             )
         elif isinstance(m, MixtralSparseMoeBlock):
             m.gate = W4A4Linear.from_float(
-                m.gate, weight_quant=weight_quant, act_quant=act_quant
+                m.gate, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits
             )
     return model
 
 
 def quantize_falcon(
-    model, weight_quant="per_channel", act_quant="per_token", quantize_bmm_input=True
+    model, weight_quant="per_channel", act_quant="per_token", quantize_bmm_input=True, quant_bits=4
 ):
     from transformers.models.falcon.modeling_falcon import (
         FalconAttention,
@@ -364,10 +371,10 @@ def quantize_falcon(
     for name, m in model.named_modules():
         if isinstance(m, FalconMLP):
             m.dense_h_to_4h = W4A4Linear.from_float(
-                m.dense_h_to_4h, weight_quant=weight_quant, act_quant=act_quant
+                m.dense_h_to_4h, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits
             )
             m.dense_4h_to_h = W4A4Linear.from_float(
-                m.dense_4h_to_h, weight_quant=weight_quant, act_quant=act_quant
+                m.dense_4h_to_h, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits
             )
         elif isinstance(m, FalconAttention):
             # Her we simulate quantizing BMM inputs by quantizing the output of q_proj, k_proj, v_proj
@@ -376,15 +383,16 @@ def quantize_falcon(
                 weight_quant=weight_quant,
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
+                quant_bits=quant_bits
             )
             m.dense = W4A4Linear.from_float(
-                m.dense, weight_quant=weight_quant, act_quant=act_quant
+                m.dense, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits
             )
     return model
 
 
 def quantize_model(
-    model, weight_quant="per_channel", act_quant="per_token", quantize_bmm_input=False
+    model, weight_quant="per_channel", act_quant="per_token", quantize_bmm_input=False, quant_bits=4
 ):
     from transformers.models.opt.modeling_opt import OPTPreTrainedModel
     from transformers.models.llama.modeling_llama import LlamaPreTrainedModel
@@ -398,6 +406,7 @@ def quantize_model(
             weight_quant=weight_quant,
             act_quant=act_quant,
             quantize_bmm_input=quantize_bmm_input,
+            quant_bits=quant_bits,
         )
     elif isinstance(model, (LlamaPreTrainedModel, MistralPreTrainedModel)):
         return quantize_llama_like(
@@ -405,6 +414,7 @@ def quantize_model(
             weight_quant=weight_quant,
             act_quant=act_quant,
             quantize_bmm_input=quantize_bmm_input,
+            quant_bits=quant_bits,
         )
     elif isinstance(model, MixtralPreTrainedModel):
         return quantize_mixtral(
@@ -412,6 +422,7 @@ def quantize_model(
             weight_quant=weight_quant,
             act_quant=act_quant,
             quantize_bmm_input=quantize_bmm_input,
+            quant_bits=quant_bits,
         )
     elif isinstance(model, FalconPreTrainedModel):
         return quantize_falcon(
@@ -419,6 +430,7 @@ def quantize_model(
             weight_quant=weight_quant,
             act_quant=act_quant,
             quantize_bmm_input=quantize_bmm_input,
+            quant_bits=quant_bits,
         )
     else:
         raise ValueError(f"Unsupported model type: {type(model)}")
