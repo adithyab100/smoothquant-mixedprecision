@@ -2,9 +2,12 @@ import torch
 from torch import nn
 from functools import partial
 
+# Global quantization bits configuration
+QUANT_BITS = 4
+
 
 @torch.no_grad()
-def quantize_weight_per_channel_absmax(w, n_bits=4):
+def quantize_weight_per_channel_absmax(w, n_bits=QUANT_BITS):
     # w: (out_features, in_features)
     scales = w.abs().max(dim=-1, keepdim=True)[0]
     q_max = 2 ** (n_bits - 1) - 1
@@ -14,7 +17,7 @@ def quantize_weight_per_channel_absmax(w, n_bits=4):
 
 
 @torch.no_grad()
-def quantize_weight_per_tensor_absmax(w, n_bits=4):
+def quantize_weight_per_tensor_absmax(w, n_bits=QUANT_BITS):
     # w: (out_features, in_features)
     scales = w.abs().max()
     q_max = 2 ** (n_bits - 1) - 1
@@ -24,7 +27,7 @@ def quantize_weight_per_tensor_absmax(w, n_bits=4):
 
 
 @torch.no_grad()
-def quantize_activation_per_token_absmax(t, n_bits=4):
+def quantize_activation_per_token_absmax(t, n_bits=QUANT_BITS):
     t_shape = t.shape
     t.view(-1, t_shape[-1])
     scales = t.abs().max(dim=-1, keepdim=True)[0]
@@ -35,7 +38,7 @@ def quantize_activation_per_token_absmax(t, n_bits=4):
 
 
 @torch.no_grad()
-def quantize_activation_per_tensor_absmax(t, n_bits=4):
+def quantize_activation_per_tensor_absmax(t, n_bits=QUANT_BITS):
     t_shape = t.shape
     t.view(-1, t_shape[-1])
     scales = t.abs().max()
@@ -44,7 +47,8 @@ def quantize_activation_per_tensor_absmax(t, n_bits=4):
     t.div_(scales).round_().mul_(scales)
     return t
 
-def quantize_gradients_hook(grad, salient_indices=None, n_bits=4):
+
+def quantize_gradients_hook(grad, salient_indices=None, n_bits=QUANT_BITS):
     """
     A hook to quantize the gradients during backpropagation, applying quantization only to non-salient gradients.
     Salient gradients are preserved in full precision.
@@ -72,56 +76,58 @@ class W4A4Linear(nn.Module):
         bias=True,
         act_quant="per_token",
         quantize_output=False,
-        importance = None,
-        salient_prop = None,
+        importance=None,
+        salient_prop=None,
     ):
-      super().__init__()
-      self.in_features = in_features
-      self.out_features = out_features
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
 
-      self.register_buffer(
-          "weight",
-          torch.randn(
-              self.out_features,
-              self.in_features,
-              dtype=torch.float16,
-              requires_grad=False,
-          ),
-      )
-      if bias:
-          self.register_buffer(
-              "bias",
-              torch.zeros(
-                  (1, self.out_features), dtype=torch.float16, requires_grad=False
-              ),
-          )
-      else:
-          self.register_buffer("bias", None)
+        self.register_buffer(
+            "weight",
+            torch.randn(
+                self.out_features,
+                self.in_features,
+                dtype=torch.float16,
+                requires_grad=False,
+            ),
+        )
+        if bias:
+            self.register_buffer(
+                "bias",
+                torch.zeros(
+                    (1, self.out_features), dtype=torch.float16, requires_grad=False
+                ),
+            )
+        else:
+            self.register_buffer("bias", None)
 
-      if act_quant == "per_token":
-          self.act_quant_name = "per_token"
-          self.act_quant = partial(quantize_activation_per_token_absmax, n_bits=4)
-      elif act_quant == "per_tensor":
-          self.act_quant_name = "per_tensor"
-          self.act_quant = partial(quantize_activation_per_tensor_absmax, n_bits=4)
-      else:
-          raise ValueError(f"Invalid act_quant: {act_quant}")
+        if act_quant == "per_token":
+            self.act_quant_name = "per_token"
+            self.act_quant = partial(quantize_activation_per_token_absmax, n_bits=QUANT_BITS)
+        elif act_quant == "per_tensor":
+            self.act_quant_name = "per_tensor"
+            self.act_quant = partial(quantize_activation_per_tensor_absmax, n_bits=QUANT_BITS)
+        else:
+            raise ValueError(f"Invalid act_quant: {act_quant}")
 
-      if quantize_output:
-          self.output_quant_name = self.act_quant_name
-          self.output_quant = self.act_quant
-      else:
-          self.output_quant_name = "None"
-          self.output_quant = lambda x: x
-      
-      self.salient_indices = None
+        if quantize_output:
+            self.output_quant_name = self.act_quant_name
+            self.output_quant = self.act_quant
+        else:
+            self.output_quant_name = "None"
+            self.output_quant = lambda x: x
 
-      if importance is not None and salient_prop is not None:
-        # print("SKIBIDI")
-        self.salient_indices = torch.topk(importance, int(salient_prop*importance.size(0)))[1]
-        # print(self.salient_indices)
-        # raise NotImplementedError
-        # print("FROM THE SCREEN TO THE RING TO PEN TO THE KING ", len(self.salient_indices), self.in_features, self.out_features)
+        self.salient_indices = None
+
+        if importance is not None and salient_prop is not None:
+            # print("SKIBIDI")
+            self.salient_indices = torch.topk(importance, int(salient_prop * importance.size(0)))[
+                1
+            ]
+            # print(self.salient_indices)
+            # raise NotImplementedError
+            # print("FROM THE SCREEN TO THE RING TO PEN TO THE KING ", len(self.salient_indices), self.in_features, self.out_features)
 
     def to(self, *args, **kwargs):
         super(W4A4Linear, self).to(*args, **kwargs)
@@ -137,20 +143,22 @@ class W4A4Linear(nn.Module):
         q_x = self.act_quant(x)
         # preserve salient activations
         if self.salient_indices is not None:
-          q_x[:, self.salient_indices] = x_salient
+            q_x[:, self.salient_indices] = x_salient
 
         y = torch.functional.F.linear(q_x, self.weight, self.bias)
         q_y = self.output_quant(y)
 
         # apply backward gradient quantization only for non-salient indices
         if self.training and self.salient_indices is not None:
-            q_y.register_hook(partial(quantize_gradients_hook, salient_indices=self.salient_indices, n_bits=4))
-            
+            q_y.register_hook(
+                partial(quantize_gradients_hook, salient_indices=self.salient_indices, n_bits=QUANT_BITS)
+            )
+
         return q_y
 
     @staticmethod
     def from_float(
-        module, weight_quant="per_channel", act_quant="per_token", quantize_output=False, importance = None, salient_prop = None
+        module, weight_quant="per_channel", act_quant="per_token", quantize_output=False, importance=None, salient_prop=None
     ):
         assert isinstance(module, torch.nn.Linear)
         new_module = W4A4Linear(
@@ -159,21 +167,21 @@ class W4A4Linear(nn.Module):
             module.bias is not None,
             act_quant=act_quant,
             quantize_output=quantize_output,
-            importance = importance,
-            salient_prop = salient_prop
+            importance=importance,
+            salient_prop=salient_prop,
         )
         outlier_weights = new_module.weight.data[:, new_module.salient_indices].clone()
         if weight_quant == "per_channel":
             new_module.weight = quantize_weight_per_channel_absmax(
-                module.weight, n_bits=4
+                module.weight, n_bits=QUANT_BITS
             )  # use 4-bit integer for weight
         elif weight_quant == "per_tensor":
             new_module.weight = quantize_weight_per_tensor_absmax(
-                module.weight, n_bits=4
+                module.weight, n_bits=QUANT_BITS
             )
         else:
             raise ValueError(f"Invalid weight_quant: {weight_quant}")
-        
+
         outlier_weights = outlier_weights.to(new_module.weight.data.dtype).to(new_module.weight.data.device)
         if new_module.salient_indices is not None:
             new_module.weight.data[:, new_module.salient_indices] = outlier_weights
@@ -189,8 +197,8 @@ class W4A4Linear(nn.Module):
 
 
 def quantize_opt(
-    model, weight_quant="per_tensor", act_quant="per_tensor", quantize_bmm_input=True
-, input_feat = None, salient_prop = None):
+    model, weight_quant="per_tensor", act_quant="per_tensor", quantize_bmm_input=True, input_feat=None, salient_prop=None
+):
     from transformers.models.opt.modeling_opt import (
         OPTAttention,
         OPTDecoderLayer,
@@ -199,51 +207,47 @@ def quantize_opt(
     for name, m in model.model.named_modules():
         # importance = None
 
-        
         if isinstance(m, OPTDecoderLayer):
-            # if importance is not None:
-            #   print("SIGMA")
-            
-            importance = sum(input_feat['model.'+name+'.fc1']).float()
+            importance = sum(input_feat["model." + name + ".fc1"]).float()
             m.fc1 = W4A4Linear.from_float(
-                m.fc1, weight_quant=weight_quant, act_quant=act_quant, importance = importance, salient_prop = salient_prop
+                m.fc1, weight_quant=weight_quant, act_quant=act_quant, importance=importance, salient_prop=salient_prop
             )
-            importance = sum(input_feat['model.'+name+'.fc2']).float()
+            importance = sum(input_feat["model." + name + ".fc2"]).float()
             m.fc2 = W4A4Linear.from_float(
-                m.fc2, weight_quant=weight_quant, act_quant=act_quant, importance = importance, salient_prop = salient_prop
+                m.fc2, weight_quant=weight_quant, act_quant=act_quant, importance=importance, salient_prop=salient_prop
             )
         elif isinstance(m, OPTAttention):
             # Her we simulate quantizing BMM inputs by quantizing the output of q_proj, k_proj, v_proj
-            importance = sum(input_feat['model.'+name+'.q_proj']).float()
+            importance = sum(input_feat["model." + name + ".q_proj"]).float()
             m.q_proj = W4A4Linear.from_float(
                 m.q_proj,
                 weight_quant=weight_quant,
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
-                importance = importance,
-                salient_prop = salient_prop
+                importance=importance,
+                salient_prop=salient_prop,
             )
-            importance = sum(input_feat['model.'+name+'.k_proj']).float()
+            importance = sum(input_feat["model." + name + ".k_proj"]).float()
             m.k_proj = W4A4Linear.from_float(
                 m.k_proj,
                 weight_quant=weight_quant,
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
-                importance = importance,
-                salient_prop = salient_prop
+                importance=importance,
+                salient_prop=salient_prop,
             )
-            importance = sum(input_feat['model.'+name+'.v_proj']).float()
+            importance = sum(input_feat["model." + name + ".v_proj"]).float()
             m.v_proj = W4A4Linear.from_float(
                 m.v_proj,
                 weight_quant=weight_quant,
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
-                importance = importance,
-                salient_prop = salient_prop
+                importance=importance,
+                salient_prop=salient_prop,
             )
-            importance = sum(input_feat['model.'+name+'.out_proj']).float()
+            importance = sum(input_feat["model." + name + ".out_proj"]).float()
             m.out_proj = W4A4Linear.from_float(
-                m.out_proj, weight_quant=weight_quant, act_quant=act_quant, importance = importance, salient_prop = salient_prop
+                m.out_proj, weight_quant=weight_quant, act_quant=act_quant, importance=importance, salient_prop=salient_prop
             )
             # print("OHIO")
     return model
