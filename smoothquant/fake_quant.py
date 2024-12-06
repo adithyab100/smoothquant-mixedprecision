@@ -518,8 +518,18 @@ def quantize_llama_like(
 
 
 def quantize_mixtral(
-    model, weight_quant="per_channel", act_quant="per_token", quantize_bmm_input=False, quant_bits=4, group_size=128
+    model, 
+    weight_quant="per_channel", 
+    act_quant="per_token", 
+    quantize_bmm_input=False, 
+    input_feat=None, 
+    salient_prop=None, 
+    quant_bits=4, 
+    group_size=128,
+    min_prop=0,
+    max_prop=0,
 ):
+    max_prop = max(min_prop, max_prop)
     from transformers.models.mixtral.modeling_mixtral import (
         MixtralAttention,
         MixtralSparseMoeBlock,
@@ -528,54 +538,124 @@ def quantize_mixtral(
 
     for name, m in model.model.named_modules():
         if isinstance(m, MixtralBLockSparseTop2MLP):
+            importance = sum(input_feat["model." + name + ".w1"]).float() if input_feat else None
             m.w1 = W4A4Linear.from_float(
-                m.w1, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits, group_size=group_size
+                m.w1, 
+                weight_quant=weight_quant, 
+                act_quant=act_quant, 
+                importance=importance, 
+                salient_prop=salient_prop, 
+                quant_bits=quant_bits, 
+                group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
+            importance = sum(input_feat["model." + name + ".w2"]).float() if input_feat else None
             m.w2 = W4A4Linear.from_float(
-                m.w2, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits, group_size=group_size
+                m.w2, 
+                weight_quant=weight_quant, 
+                act_quant=act_quant, 
+                importance=importance, 
+                salient_prop=salient_prop, 
+                quant_bits=quant_bits, 
+                group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
+            importance = sum(input_feat["model." + name + ".w3"]).float() if input_feat else None
             m.w3 = W4A4Linear.from_float(
-                m.w3, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits, group_size=group_size
+                m.w3, 
+                weight_quant=weight_quant, 
+                act_quant=act_quant, 
+                importance=importance, 
+                salient_prop=salient_prop, 
+                quant_bits=quant_bits, 
+                group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
         elif isinstance(m, MixtralAttention):
             # Here we simulate quantizing BMM inputs by quantizing the output of q_proj, k_proj, v_proj
+            importance = sum(input_feat["model." + name + ".q_proj"]).float() if input_feat else None
             m.q_proj = W4A4Linear.from_float(
                 m.q_proj,
                 weight_quant=weight_quant,
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
+                importance=importance,
+                salient_prop=salient_prop,
                 quant_bits=quant_bits,
                 group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
+            importance = sum(input_feat["model." + name + ".k_proj"]).float() if input_feat else None
             m.k_proj = W4A4Linear.from_float(
                 m.k_proj,
                 weight_quant=weight_quant,
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
+                importance=importance,
+                salient_prop=salient_prop,
                 quant_bits=quant_bits,
                 group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
+            importance = sum(input_feat["model." + name + ".v_proj"]).float() if input_feat else None
             m.v_proj = W4A4Linear.from_float(
                 m.v_proj,
                 weight_quant=weight_quant,
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
+                importance=importance,
+                salient_prop=salient_prop,
                 quant_bits=quant_bits,
                 group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
+            importance = sum(input_feat["model." + name + ".o_proj"]).float() if input_feat else None
             m.o_proj = W4A4Linear.from_float(
-                m.o_proj, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits, group_size=group_size
+                m.o_proj, 
+                weight_quant=weight_quant, 
+                act_quant=act_quant, 
+                importance=importance, 
+                salient_prop=salient_prop, 
+                quant_bits=quant_bits, 
+                group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
         elif isinstance(m, MixtralSparseMoeBlock):
+            importance = sum(input_feat["model." + name + ".gate"]).float() if input_feat else None
             m.gate = W4A4Linear.from_float(
-                m.gate, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits, group_size=group_size
+                m.gate, 
+                weight_quant=weight_quant, 
+                act_quant=act_quant, 
+                importance=importance, 
+                salient_prop=salient_prop, 
+                quant_bits=quant_bits, 
+                group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
     return model
 
 
 def quantize_falcon(
-    model, weight_quant="per_channel", act_quant="per_token", quantize_bmm_input=True, quant_bits=4, group_size=128
+    model, 
+    weight_quant="per_channel", 
+    act_quant="per_token", 
+    quantize_bmm_input=True, 
+    input_feat=None, 
+    salient_prop=None, 
+    quant_bits=4, 
+    group_size=128,
+    min_prop=0,
+    max_prop=0,
 ):
+    max_prop = max(min_prop, max_prop)
     from transformers.models.falcon.modeling_falcon import (
         FalconAttention,
         FalconMLP,
@@ -583,30 +663,71 @@ def quantize_falcon(
 
     for name, m in model.named_modules():
         if isinstance(m, FalconMLP):
+            importance = sum(input_feat["model." + name + ".dense_h_to_4h"]).float() if input_feat else None
             m.dense_h_to_4h = W4A4Linear.from_float(
-                m.dense_h_to_4h, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits, group_size=group_size
+                m.dense_h_to_4h, 
+                weight_quant=weight_quant, 
+                act_quant=act_quant, 
+                importance=importance, 
+                salient_prop=salient_prop, 
+                quant_bits=quant_bits, 
+                group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
+            importance = sum(input_feat["model." + name + ".dense_4h_to_h"]).float() if input_feat else None
             m.dense_4h_to_h = W4A4Linear.from_float(
-                m.dense_4h_to_h, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits, group_size=group_size
+                m.dense_4h_to_h, 
+                weight_quant=weight_quant, 
+                act_quant=act_quant, 
+                importance=importance, 
+                salient_prop=salient_prop, 
+                quant_bits=quant_bits, 
+                group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
         elif isinstance(m, FalconAttention):
             # Here we simulate quantizing BMM inputs by quantizing the output of q_proj, k_proj, v_proj
+            importance = sum(input_feat["model." + name + ".query_key_value"]).float() if input_feat else None
             m.query_key_value = W4A4Linear.from_float(
                 m.query_key_value,
                 weight_quant=weight_quant,
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
+                importance=importance,
+                salient_prop=salient_prop,
                 quant_bits=quant_bits,
                 group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
+            importance = sum(input_feat["model." + name + ".dense"]).float() if input_feat else None
             m.dense = W4A4Linear.from_float(
-                m.dense, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits, group_size=group_size
+                m.dense, 
+                weight_quant=weight_quant, 
+                act_quant=act_quant, 
+                importance=importance, 
+                salient_prop=salient_prop, 
+                quant_bits=quant_bits, 
+                group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
     return model
 
 
 def quantize_model(
-    model, weight_quant="per_channel", act_quant="per_token", quantize_bmm_input=False, quant_bits=4, group_size=128
+    model, 
+    weight_quant="per_channel", 
+    act_quant="per_token", 
+    quantize_bmm_input=False, 
+    input_feat=None,
+    salient_prop=None,
+    quant_bits=4, 
+    group_size=128,
+    min_prop=0,
+    max_prop=0,
 ):
     from transformers.models.opt.modeling_opt import OPTPreTrainedModel
     from transformers.models.llama.modeling_llama import LlamaPreTrainedModel
@@ -620,8 +741,12 @@ def quantize_model(
             weight_quant=weight_quant,
             act_quant=act_quant,
             quantize_bmm_input=quantize_bmm_input,
+            input_feat=input_feat,
+            salient_prop=salient_prop,
             quant_bits=quant_bits,
             group_size=group_size,
+            min_prop=min_prop,
+            max_prop=max_prop,
         )
     elif isinstance(model, (LlamaPreTrainedModel, MistralPreTrainedModel)):
         return quantize_llama_like(
@@ -629,8 +754,12 @@ def quantize_model(
             weight_quant=weight_quant,
             act_quant=act_quant,
             quantize_bmm_input=quantize_bmm_input,
+            input_feat=input_feat,
+            salient_prop=salient_prop,
             quant_bits=quant_bits,
             group_size=group_size,
+            min_prop=min_prop,
+            max_prop=max_prop,
         )
     elif isinstance(model, MixtralPreTrainedModel):
         return quantize_mixtral(
@@ -638,8 +767,12 @@ def quantize_model(
             weight_quant=weight_quant,
             act_quant=act_quant,
             quantize_bmm_input=quantize_bmm_input,
+            input_feat=input_feat,
+            salient_prop=salient_prop,
             quant_bits=quant_bits,
             group_size=group_size,
+            min_prop=min_prop,
+            max_prop=max_prop,
         )
     elif isinstance(model, FalconPreTrainedModel):
         return quantize_falcon(
@@ -647,8 +780,12 @@ def quantize_model(
             weight_quant=weight_quant,
             act_quant=act_quant,
             quantize_bmm_input=quantize_bmm_input,
+            input_feat=input_feat,
+            salient_prop=salient_prop,
             quant_bits=quant_bits,
             group_size=group_size,
+            min_prop=min_prop,
+            max_prop=max_prop,
         )
     else:
         raise ValueError(f"Unsupported model type: {type(model)}")
