@@ -401,8 +401,18 @@ def quantize_opt(
 
 
 def quantize_llama_like(
-    model, weight_quant="per_channel", act_quant="per_token", quantize_bmm_input=False, quant_bits=4, group_size=128
+    model, 
+    weight_quant="per_channel", 
+    act_quant="per_token", 
+    quantize_bmm_input=False, 
+    input_feat=None, 
+    salient_prop=None, 
+    quant_bits=4, 
+    group_size=128,
+    min_prop=0,
+    max_prop=0,
 ):
+    max_prop = max(min_prop, max_prop)
     from transformers.models.llama.modeling_llama import (
         LlamaAttention,
         LlamaMLP,
@@ -415,43 +425,94 @@ def quantize_llama_like(
 
     for name, m in model.model.named_modules():
         if isinstance(m, (LlamaMLP, MistralMLP)):
+            importance = sum(input_feat["model." + name + ".gate_proj"]).float() if input_feat else None
             m.gate_proj = W4A4Linear.from_float(
-                m.gate_proj, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits, group_size=group_size
+                m.gate_proj, 
+                weight_quant=weight_quant, 
+                act_quant=act_quant, 
+                importance=importance, 
+                salient_prop=salient_prop, 
+                quant_bits=quant_bits, 
+                group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
+            importance = sum(input_feat["model." + name + ".up_proj"]).float() if input_feat else None
             m.up_proj = W4A4Linear.from_float(
-                m.up_proj, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits, group_size=group_size
+                m.up_proj, 
+                weight_quant=weight_quant, 
+                act_quant=act_quant, 
+                importance=importance, 
+                salient_prop=salient_prop, 
+                quant_bits=quant_bits, 
+                group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
+            importance = sum(input_feat["model." + name + ".down_proj"]).float() if input_feat else None
             m.down_proj = W4A4Linear.from_float(
-                m.down_proj, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits, group_size=group_size
+                m.down_proj, 
+                weight_quant=weight_quant, 
+                act_quant=act_quant, 
+                importance=importance, 
+                salient_prop=salient_prop, 
+                quant_bits=quant_bits, 
+                group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
         elif isinstance(m, (LlamaAttention, MistralAttention)):
             # Here we simulate quantizing BMM inputs by quantizing the output of q_proj, k_proj, v_proj
+            importance = sum(input_feat["model." + name + ".q_proj"]).float() if input_feat else None
             m.q_proj = W4A4Linear.from_float(
                 m.q_proj,
                 weight_quant=weight_quant,
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
+                importance=importance,
+                salient_prop=salient_prop,
                 quant_bits=quant_bits,
                 group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
+            importance = sum(input_feat["model." + name + ".k_proj"]).float() if input_feat else None
             m.k_proj = W4A4Linear.from_float(
                 m.k_proj,
                 weight_quant=weight_quant,
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
+                importance=importance,
+                salient_prop=salient_prop,
                 quant_bits=quant_bits,
                 group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
+            importance = sum(input_feat["model." + name + ".v_proj"]).float() if input_feat else None
             m.v_proj = W4A4Linear.from_float(
                 m.v_proj,
                 weight_quant=weight_quant,
                 act_quant=act_quant,
                 quantize_output=quantize_bmm_input,
+                importance=importance,
+                salient_prop=salient_prop,
                 quant_bits=quant_bits,
                 group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
+            importance = sum(input_feat["model." + name + ".o_proj"]).float() if input_feat else None
             m.o_proj = W4A4Linear.from_float(
-                m.o_proj, weight_quant=weight_quant, act_quant=act_quant, quant_bits=quant_bits, group_size=group_size
+                m.o_proj, 
+                weight_quant=weight_quant, 
+                act_quant=act_quant, 
+                importance=importance, 
+                salient_prop=salient_prop, 
+                quant_bits=quant_bits, 
+                group_size=group_size,
+                min_prop=min_prop,
+                max_prop=max_prop,
             )
     return model
 
