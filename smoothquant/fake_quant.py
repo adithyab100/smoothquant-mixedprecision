@@ -185,9 +185,15 @@ class W4A4Linear(nn.Module):
 
         self.salient_indices = None
         if importance is not None:
-            adaptive_prop = compute_adaptive_salient_prop(importance, min_prop=min_prop, max_prop=max_prop)
-            if adaptive_prop is not None:
-                self.salient_indices = torch.topk(importance, int(adaptive_prop * importance.size(0)))[1]
+            if salient_prop is not None:
+                # Use fixed proportion if provided
+                prop = salient_prop
+            else:
+                # Fall back to adaptive proportion
+                prop = compute_adaptive_salient_prop(importance, min_prop=min_prop, max_prop=max_prop)
+            
+            if prop is not None:
+                self.salient_indices = torch.topk(importance, int(prop * importance.size(0)))[1]
 
     def to(self, *args, **kwargs):
         super(W4A4Linear, self).to(*args, **kwargs)
