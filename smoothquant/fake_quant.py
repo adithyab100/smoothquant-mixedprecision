@@ -102,29 +102,6 @@ def quantize_activation_per_group_absmax(t, n_bits, group_size=128):
     return t.view(t_shape)
 
 
-def compute_adaptive_salient_prop(importance, min_prop=0, max_prop=0):
-    """
-    Compute adaptive salient proportion based on importance skewness.
-    - High skewness (many low importance values) -> lower proportion
-    - Low skewness (more uniform importance) -> higher proportion
-    """
-    if importance is None:
-        return None
-        
-    # Calculate skewness of importance values
-    importance_np = importance.cpu().numpy()
-    skewness = stats.skew(importance_np)
-    
-    # Normalize skewness to [0, 1] range using sigmoid
-    normalized_skew = 1 / (1 + np.exp(-skewness))
-    
-    # Inverse relationship: high skew -> low proportion
-    prop = max_prop - (max_prop - min_prop) * normalized_skew
-    
-    # Ensure proportion is within bounds
-    return float(np.clip(prop, min_prop, max_prop))
-
-
 class W4A4Linear(nn.Module):
     def __init__(
         self,
@@ -134,11 +111,9 @@ class W4A4Linear(nn.Module):
         act_quant="per_token",
         quantize_output=False,
         importance=None,
-        salient_prop=None,
+        salient_prop=0,
         quant_bits=4,
         group_size=128,
-        min_prop=0,
-        max_prop=0,
     ):
         super().__init__()
         self.in_features = in_features
@@ -184,16 +159,11 @@ class W4A4Linear(nn.Module):
             self.output_quant = lambda x: x
 
         self.salient_indices = None
-        if importance is not None:
-            if salient_prop is not None:
-                # Use fixed proportion if provided
-                prop = salient_prop
-            else:
-                # Fall back to adaptive proportion
-                prop = compute_adaptive_salient_prop(importance, min_prop=min_prop, max_prop=max_prop)
-            
-            if prop is not None:
-                self.salient_indices = torch.topk(importance, int(prop * importance.size(0)))[1]
+        if importance is not None and salient_prop > 0:
+            # Sort channels by importance
+            sorted_idx = torch.argsort(importance, descending=True)
+            num_salient = max(1, int(salient_prop * len(sorted_idx)))
+            self.salient_indices = sorted_idx[:num_salient]
 
     def to(self, *args, **kwargs):
         super(W4A4Linear, self).to(*args, **kwargs)
@@ -254,11 +224,9 @@ class W4A4Linear(nn.Module):
         act_quant="per_token", 
         quantize_output=False, 
         importance=None, 
-        salient_prop=None, 
+        salient_prop=0, 
         quant_bits=4, 
         group_size=128,
-        min_prop=0,
-        max_prop=0,
     ):
         assert isinstance(module, torch.nn.Linear)
         new_module = W4A4Linear(
@@ -271,8 +239,6 @@ class W4A4Linear(nn.Module):
             salient_prop=salient_prop,
             quant_bits=quant_bits,
             group_size=group_size,
-            min_prop=min_prop,
-            max_prop=max_prop,
         )
         outlier_weights = module.weight.data[:, new_module.salient_indices].clone()
         if weight_quant == "per_channel":
@@ -310,13 +276,10 @@ def quantize_opt(
     act_quant="per_tensor", 
     quantize_bmm_input=True, 
     input_feat=None, 
-    salient_prop=None, 
+    salient_prop=0, 
     quant_bits=4, 
     group_size=128,
-    min_prop=0,
-    max_prop=0,
 ):
-    max_prop = max(min_prop, max_prop)
     from transformers.models.opt.modeling_opt import (
         OPTAttention,
         OPTDecoderLayer,
@@ -335,8 +298,6 @@ def quantize_opt(
                 salient_prop=salient_prop, 
                 quant_bits=quant_bits, 
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
             importance = sum(input_feat["model." + name + ".fc2"]).float()
             m.fc2 = W4A4Linear.from_float(
@@ -347,8 +308,6 @@ def quantize_opt(
                 salient_prop=salient_prop, 
                 quant_bits=quant_bits, 
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
         elif isinstance(m, OPTAttention):
             # Here we simulate quantizing BMM inputs by quantizing the output of q_proj, k_proj, v_proj
@@ -362,8 +321,6 @@ def quantize_opt(
                 salient_prop=salient_prop,
                 quant_bits=quant_bits,
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
             importance = sum(input_feat["model." + name + ".k_proj"]).float()
             m.k_proj = W4A4Linear.from_float(
@@ -375,8 +332,6 @@ def quantize_opt(
                 salient_prop=salient_prop,
                 quant_bits=quant_bits,
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
             importance = sum(input_feat["model." + name + ".v_proj"]).float()
             m.v_proj = W4A4Linear.from_float(
@@ -388,8 +343,6 @@ def quantize_opt(
                 salient_prop=salient_prop,
                 quant_bits=quant_bits,
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
             importance = sum(input_feat["model." + name + ".out_proj"]).float()
             m.out_proj = W4A4Linear.from_float(
@@ -400,8 +353,6 @@ def quantize_opt(
                 salient_prop=salient_prop, 
                 quant_bits=quant_bits, 
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
     return model
 
@@ -412,13 +363,10 @@ def quantize_llama_like(
     act_quant="per_token", 
     quantize_bmm_input=False, 
     input_feat=None, 
-    salient_prop=None, 
+    salient_prop=0, 
     quant_bits=4, 
     group_size=128,
-    min_prop=0,
-    max_prop=0,
 ):
-    max_prop = max(min_prop, max_prop)
     from transformers.models.llama.modeling_llama import (
         LlamaAttention,
         LlamaMLP,
@@ -440,8 +388,6 @@ def quantize_llama_like(
                 salient_prop=salient_prop, 
                 quant_bits=quant_bits, 
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
             importance = sum(input_feat["model." + name + ".up_proj"]).float() if input_feat else None
             m.up_proj = W4A4Linear.from_float(
@@ -452,8 +398,6 @@ def quantize_llama_like(
                 salient_prop=salient_prop, 
                 quant_bits=quant_bits, 
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
             importance = sum(input_feat["model." + name + ".down_proj"]).float() if input_feat else None
             m.down_proj = W4A4Linear.from_float(
@@ -464,8 +408,6 @@ def quantize_llama_like(
                 salient_prop=salient_prop, 
                 quant_bits=quant_bits, 
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
         elif isinstance(m, (LlamaAttention, MistralAttention)):
             # Here we simulate quantizing BMM inputs by quantizing the output of q_proj, k_proj, v_proj
@@ -479,8 +421,6 @@ def quantize_llama_like(
                 salient_prop=salient_prop,
                 quant_bits=quant_bits,
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
             importance = sum(input_feat["model." + name + ".k_proj"]).float() if input_feat else None
             m.k_proj = W4A4Linear.from_float(
@@ -492,8 +432,6 @@ def quantize_llama_like(
                 salient_prop=salient_prop,
                 quant_bits=quant_bits,
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
             importance = sum(input_feat["model." + name + ".v_proj"]).float() if input_feat else None
             m.v_proj = W4A4Linear.from_float(
@@ -505,8 +443,6 @@ def quantize_llama_like(
                 salient_prop=salient_prop,
                 quant_bits=quant_bits,
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
             importance = sum(input_feat["model." + name + ".o_proj"]).float() if input_feat else None
             m.o_proj = W4A4Linear.from_float(
@@ -517,8 +453,6 @@ def quantize_llama_like(
                 salient_prop=salient_prop, 
                 quant_bits=quant_bits, 
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
     return model
 
@@ -529,13 +463,10 @@ def quantize_mixtral(
     act_quant="per_token", 
     quantize_bmm_input=False, 
     input_feat=None, 
-    salient_prop=None, 
+    salient_prop=0, 
     quant_bits=4, 
     group_size=128,
-    min_prop=0,
-    max_prop=0,
 ):
-    max_prop = max(min_prop, max_prop)
     from transformers.models.mixtral.modeling_mixtral import (
         MixtralAttention,
         MixtralSparseMoeBlock,
@@ -553,8 +484,6 @@ def quantize_mixtral(
                 salient_prop=salient_prop, 
                 quant_bits=quant_bits, 
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
             importance = sum(input_feat["model." + name + ".w2"]).float() if input_feat else None
             m.w2 = W4A4Linear.from_float(
@@ -565,8 +494,6 @@ def quantize_mixtral(
                 salient_prop=salient_prop, 
                 quant_bits=quant_bits, 
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
             importance = sum(input_feat["model." + name + ".w3"]).float() if input_feat else None
             m.w3 = W4A4Linear.from_float(
@@ -577,8 +504,6 @@ def quantize_mixtral(
                 salient_prop=salient_prop, 
                 quant_bits=quant_bits, 
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
         elif isinstance(m, MixtralAttention):
             # Here we simulate quantizing BMM inputs by quantizing the output of q_proj, k_proj, v_proj
@@ -592,8 +517,6 @@ def quantize_mixtral(
                 salient_prop=salient_prop,
                 quant_bits=quant_bits,
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
             importance = sum(input_feat["model." + name + ".k_proj"]).float() if input_feat else None
             m.k_proj = W4A4Linear.from_float(
@@ -605,8 +528,6 @@ def quantize_mixtral(
                 salient_prop=salient_prop,
                 quant_bits=quant_bits,
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
             importance = sum(input_feat["model." + name + ".v_proj"]).float() if input_feat else None
             m.v_proj = W4A4Linear.from_float(
@@ -618,8 +539,6 @@ def quantize_mixtral(
                 salient_prop=salient_prop,
                 quant_bits=quant_bits,
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
             importance = sum(input_feat["model." + name + ".o_proj"]).float() if input_feat else None
             m.o_proj = W4A4Linear.from_float(
@@ -630,8 +549,6 @@ def quantize_mixtral(
                 salient_prop=salient_prop, 
                 quant_bits=quant_bits, 
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
         elif isinstance(m, MixtralSparseMoeBlock):
             importance = sum(input_feat["model." + name + ".gate"]).float() if input_feat else None
@@ -643,8 +560,6 @@ def quantize_mixtral(
                 salient_prop=salient_prop, 
                 quant_bits=quant_bits, 
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
     return model
 
@@ -655,13 +570,10 @@ def quantize_falcon(
     act_quant="per_token", 
     quantize_bmm_input=True, 
     input_feat=None, 
-    salient_prop=None, 
+    salient_prop=0, 
     quant_bits=4, 
     group_size=128,
-    min_prop=0,
-    max_prop=0,
 ):
-    max_prop = max(min_prop, max_prop)
     from transformers.models.falcon.modeling_falcon import (
         FalconAttention,
         FalconMLP,
@@ -678,8 +590,6 @@ def quantize_falcon(
                 salient_prop=salient_prop, 
                 quant_bits=quant_bits, 
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
             importance = sum(input_feat["model." + name + ".dense_4h_to_h"]).float() if input_feat else None
             m.dense_4h_to_h = W4A4Linear.from_float(
@@ -690,8 +600,6 @@ def quantize_falcon(
                 salient_prop=salient_prop, 
                 quant_bits=quant_bits, 
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
         elif isinstance(m, FalconAttention):
             # Here we simulate quantizing BMM inputs by quantizing the output of q_proj, k_proj, v_proj
@@ -705,8 +613,6 @@ def quantize_falcon(
                 salient_prop=salient_prop,
                 quant_bits=quant_bits,
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
             importance = sum(input_feat["model." + name + ".dense"]).float() if input_feat else None
             m.dense = W4A4Linear.from_float(
@@ -717,8 +623,6 @@ def quantize_falcon(
                 salient_prop=salient_prop, 
                 quant_bits=quant_bits, 
                 group_size=group_size,
-                min_prop=min_prop,
-                max_prop=max_prop,
             )
     return model
 
@@ -729,11 +633,9 @@ def quantize_model(
     act_quant="per_token", 
     quantize_bmm_input=False, 
     input_feat=None,
-    salient_prop=None,
+    salient_prop=0,
     quant_bits=4, 
     group_size=128,
-    min_prop=0,
-    max_prop=0,
 ):
     from transformers.models.opt.modeling_opt import OPTPreTrainedModel
     from transformers.models.llama.modeling_llama import LlamaPreTrainedModel
@@ -751,8 +653,6 @@ def quantize_model(
             salient_prop=salient_prop,
             quant_bits=quant_bits,
             group_size=group_size,
-            min_prop=min_prop,
-            max_prop=max_prop,
         )
     elif isinstance(model, (LlamaPreTrainedModel, MistralPreTrainedModel)):
         return quantize_llama_like(
@@ -764,8 +664,6 @@ def quantize_model(
             salient_prop=salient_prop,
             quant_bits=quant_bits,
             group_size=group_size,
-            min_prop=min_prop,
-            max_prop=max_prop,
         )
     elif isinstance(model, MixtralPreTrainedModel):
         return quantize_mixtral(
@@ -777,8 +675,6 @@ def quantize_model(
             salient_prop=salient_prop,
             quant_bits=quant_bits,
             group_size=group_size,
-            min_prop=min_prop,
-            max_prop=max_prop,
         )
     elif isinstance(model, FalconPreTrainedModel):
         return quantize_falcon(
@@ -790,8 +686,6 @@ def quantize_model(
             salient_prop=salient_prop,
             quant_bits=quant_bits,
             group_size=group_size,
-            min_prop=min_prop,
-            max_prop=max_prop,
         )
     else:
         raise ValueError(f"Unsupported model type: {type(model)}")
