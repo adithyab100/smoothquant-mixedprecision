@@ -115,7 +115,7 @@ def quantize_activation_per_group_absmax(t, n_bits, group_size=128):
         for j in range(original_indices.shape[1]):
             if original_indices_grouped[i, j] < t.shape[-1]:  # Check for valid index
                 output[i, original_indices_grouped[i, j]] = quantized[i, j]
-                
+
 @torch.no_grad()
 def quantize_weight_per_group_absmax(w, n_bits, group_size=128):
     # w: (out_features, in_features)
@@ -174,7 +174,7 @@ class W4A4Linear(nn.Module):
         group_size=128,
     ):
         super().__init__()
-        self.in_features = in_featuresa
+        self.in_features = in_features
         self.out_features = out_features
         self.group_size = group_size
 
