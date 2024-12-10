@@ -80,7 +80,7 @@ def quantize_activation_per_group_absmax(t, n_bits, group_size=128):
     t_shape = t.shape
     t = t.view(-1, t_shape[-1])
     num_groups = (t.shape[-1] + group_size - 1) // group_size
-    
+    t, _ = torch.sort(t.abs(), dim=-1, descending=True)
     # Pad if needed
     if t.shape[-1] % group_size != 0:
         pad_size = group_size - (t.shape[-1] % group_size)
@@ -633,10 +633,14 @@ def quantize_model(
     act_quant="per_token", 
     quantize_bmm_input=False, 
     input_feat=None,
-    salient_prop=0,
+    salient_prop=None,
     quant_bits=4, 
     group_size=128,
+    min_prop=0,
+    max_prop=0,
 ):
+    if input_feat is None:
+        input_feat = {}
     from transformers.models.opt.modeling_opt import OPTPreTrainedModel
     from transformers.models.llama.modeling_llama import LlamaPreTrainedModel
     from transformers.models.mistral.modeling_mistral import MistralPreTrainedModel
