@@ -79,28 +79,86 @@ def quantize_activation_per_tensor_absmax(t, n_bits):
 def quantize_activation_per_group_absmax(t, n_bits, group_size=128):
     t_shape = t.shape
     t = t.view(-1, t_shape[-1])
+    
+    # Store original indices
+    original_indices = torch.arange(t.shape[-1]).unsqueeze(0).expand(t.shape[0], -1)
+    
+    # Sort tensor by absolute values in descending order
+    t_sorted, sorted_indices = torch.sort(t.abs(), dim=-1, descending=True)
+    
     num_groups = (t.shape[-1] + group_size - 1) // group_size
-    t, _ = torch.sort(t.abs(), dim=-1, descending=True)
+    
     # Pad if needed
-    if t.shape[-1] % group_size != 0:
-        pad_size = group_size - (t.shape[-1] % group_size)
-        t = torch.nn.functional.pad(t, (0, pad_size))
-    
+    if t_sorted.shape[-1] % group_size != 0:
+        pad_size = group_size - (t_sorted.shape[-1] % group_size)
+        t_sorted = torch.nn.functional.pad(t_sorted, (0, pad_size))
+        original_indices = torch.nn.functional.pad(original_indices, (0, pad_size))
+
     # Reshape to group dimension
-    t_grouped = t.view(t.shape[0], num_groups, group_size)
-    
-    # Compute scales per group
+    t_grouped = t_sorted.view(t_sorted.shape[0], num_groups, group_size)
+    original_indices_grouped = original_indices.view(original_indices.shape[0], num_groups, group_size)
+
+    # Compute scales per group using the grouped tensor
     scales = t_grouped.abs().max(dim=-1, keepdim=True)[0]
     q_max = 2 ** (n_bits - 1) - 1
     scales.clamp_(min=1e-5).div_(q_max)
-    
-    # Quantize each group
-    t_grouped.div_(scales).round_().mul_(scales)
-    
-    # Reshape back and remove padding
-    t = t_grouped.view(t.shape[0], -1)[:, :t_shape[-1]]
-    return t.view(t_shape)
 
+    # Quantize each group
+    quantized = t_grouped.div_(scales).round_().mul_(scales)
+
+    # Reshape back and remove padding
+    quantized = quantized.view(t.shape[0], -1)[:, :t_shape[-1]]
+    
+    # Create the final output tensor using the original indices
+    output = torch.empty_like(t)
+    for i in range(original_indices.shape[0]):
+        for j in range(original_indices.shape[1]):
+            if original_indices_grouped[i, j] < t.shape[-1]:  # Check for valid index
+                output[i, original_indices_grouped[i, j]] = quantized[i, j]
+                
+@torch.no_grad()
+def quantize_weight_per_group_absmax(w, n_bits, group_size=128):
+    # w: (out_features, in_features)
+    w_shape = w.shape
+    w = w.view(-1, w_shape[-1])
+    
+    # Store original indices
+    original_indices = torch.arange(w.shape[-1]).unsqueeze(0).expand(w.shape[0], -1)
+    
+    # Sort weights by absolute values in descending order
+    w_sorted, sorted_indices = torch.sort(w.abs(), dim=-1, descending=True)
+
+    num_groups = (w_shape[1] + group_size - 1) // group_size
+    
+    # Pad if needed
+    if w_sorted.shape[-1] % group_size != 0:
+        pad_size = group_size - (w_sorted.shape[-1] % group_size)
+        w_sorted = torch.nn.functional.pad(w_sorted, (0, pad_size))
+        original_indices = torch.nn.functional.pad(original_indices, (0, pad_size))
+
+    # Reshape to group dimension
+    w_grouped = w_sorted.view(w_sorted.shape[0], num_groups, group_size)
+    original_indices_grouped = original_indices.view(original_indices.shape[0], num_groups, group_size)
+
+    # Compute scales per group using the grouped tensor
+    scales = w_grouped.abs().max(dim=-1, keepdim=True)[0]
+    q_max = 2 ** (n_bits - 1) - 1
+    scales.clamp_(min=1e-5).div_(q_max)
+
+    # Quantize each group
+    quantized = w_grouped.div_(scales).round_().mul_(scales)
+
+    # Reshape back and remove padding
+    quantized = quantized.view(w_shape[0], -1)[:, :w_shape[1]]
+    
+    # Create the final output tensor using the original indices
+    output = torch.empty_like(w)
+    for i in range(original_indices.shape[0]):
+        for j in range(original_indices.shape[1]):
+            if original_indices_grouped[i, j] < w.shape[-1]:  # Check for valid index
+                output[i, original_indices_grouped[i, j]] = quantized[i, j]
+
+    return output
 
 class W4A4Linear(nn.Module):
     def __init__(
@@ -116,7 +174,7 @@ class W4A4Linear(nn.Module):
         group_size=128,
     ):
         super().__init__()
-        self.in_features = in_features
+        self.in_features = in_featuresa
         self.out_features = out_features
         self.group_size = group_size
 
