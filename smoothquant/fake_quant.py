@@ -74,91 +74,138 @@ def quantize_activation_per_tensor_absmax(t, n_bits):
     t.div_(scales).round_().mul_(scales)
     return t
 
-
 @torch.no_grad()
 def quantize_activation_per_group_absmax(t, n_bits, group_size=128):
     t_shape = t.shape
     t = t.view(-1, t_shape[-1])
-    
-    # Store original indices
-    original_indices = torch.arange(t.shape[-1]).unsqueeze(0).expand(t.shape[0], -1)
-    
-    # Sort tensor by absolute values in descending order
-    t_sorted, sorted_indices = torch.sort(t.abs(), dim=-1, descending=True)
-    
     num_groups = (t.shape[-1] + group_size - 1) // group_size
     
     # Pad if needed
-    if t_sorted.shape[-1] % group_size != 0:
-        pad_size = group_size - (t_sorted.shape[-1] % group_size)
-        t_sorted = torch.nn.functional.pad(t_sorted, (0, pad_size))
-        original_indices = torch.nn.functional.pad(original_indices, (0, pad_size))
-
+    if t.shape[-1] % group_size != 0:
+        pad_size = group_size - (t.shape[-1] % group_size)
+        t = torch.nn.functional.pad(t, (0, pad_size))
+    
     # Reshape to group dimension
-    t_grouped = t_sorted.view(t_sorted.shape[0], num_groups, group_size)
-    original_indices_grouped = original_indices.view(original_indices.shape[0], num_groups, group_size)
+    t_grouped = t.view(t.shape[0], num_groups, group_size)
+    
+    # Compute scales per group
+    scales = t_grouped.abs().max(dim=-1, keepdim=True)[0]
+    q_max = 2 ** (n_bits - 1) - 1
+    scales.clamp_(min=1e-5).div_(q_max)
+    
+    # Quantize each group
+    t_grouped.div_(scales).round_().mul_(scales)
+    
+    # Reshape back and remove padding
+    t = t_grouped.view(t.shape[0], -1)[:, :t_shape[-1]]
+    return t.view(t_shape)
 
-    # Compute scales per group using the grouped tensor
+
+@torch.no_grad()
+def quantize_activation_per_group_absmax_sort(t, n_bits, group_size=128):
+    t_shape = t.shape
+    # Flatten all but the last dimension, so shape is (N, C) where N = product of all dims but the last
+    t = t.view(-1, t_shape[-1])
+    N, C = t.shape
+
+    # 1. Compute sorting indices based on argmax across the first dimension (N)
+    #    For each column (channel), find the row index of its max absolute value
+    col_max_idx = t.abs().argmax(dim=0)  # shape: [C]
+
+    # Sort columns by their argmax index
+    sorted_indices = torch.argsort(col_max_idx)
+    # Keep track of original indices for reordering
+    original_indices = torch.arange(C, device=t.device)
+
+    # Apply the sorting
+    t = t[:, sorted_indices]
+    original_indices = original_indices[sorted_indices]
+
+    # 2. Pad if needed
+    num_groups = (C + group_size - 1) // group_size
+    if C % group_size != 0:
+        pad_size = group_size - (C % group_size)
+        # Pad zeros at the end of the last dimension
+        t = torch.nn.functional.pad(t, (0, pad_size))
+    else:
+        pad_size = 0
+
+    # 3. Reshape to group dimension for quantization
+    # Now t is (N, num_groups * group_size)
+    t_grouped = t.view(N, num_groups, group_size)
+
+    # Compute scales per group
     scales = t_grouped.abs().max(dim=-1, keepdim=True)[0]
     q_max = 2 ** (n_bits - 1) - 1
     scales.clamp_(min=1e-5).div_(q_max)
 
     # Quantize each group
-    quantized = t_grouped.div_(scales).round_().mul_(scales)
+    t_grouped.div_(scales).round_().mul_(scales)
 
-    # Reshape back and remove padding
-    quantized = quantized.view(t.shape[0], -1)[:, :t_shape[-1]]
-    
-    # Create the final output tensor using the original indices
-    output = torch.empty_like(t)
-    for i in range(original_indices.shape[0]):
-        for j in range(original_indices.shape[1]):
-            if original_indices_grouped[i, j] < t.shape[-1]:  # Check for valid index
-                output[i, original_indices_grouped[i, j]] = quantized[i, j]
+    # 4. Reshape back and remove padding
+    t = t_grouped.view(N, -1)
+    if pad_size > 0:
+        t = t[:, :C]
+
+    # 5. Reorder columns back to their original ordering
+    inverse_permutation = torch.argsort(original_indices)
+    t = t[:, inverse_permutation]
+
+    # Finally, reshape to the original shape
+    return t.view(t_shape)
 
 @torch.no_grad()
-def quantize_weight_per_group_absmax(w, n_bits, group_size=128):
+def quantize_weight_per_group_absmax_sort(w, n_bits, group_size=128):
     # w: (out_features, in_features)
     w_shape = w.shape
-    w = w.view(-1, w_shape[-1])
-    
-    # Store original indices
-    original_indices = torch.arange(w.shape[-1]).unsqueeze(0).expand(w.shape[0], -1)
-    
-    # Sort weights by absolute values in descending order
-    w_sorted, sorted_indices = torch.sort(w.abs(), dim=-1, descending=True)
+    out_features, in_features = w_shape[0], w_shape[1]
 
-    num_groups = (w_shape[1] + group_size - 1) // group_size
+    # 1. Compute sorting indices based on argmax across output dimension
+    #    For each input channel (column), find the row index of its max absolute value
+    col_max_idx = w.abs().argmax(dim=0)  # shape: [in_features]
     
-    # Pad if needed
-    if w_sorted.shape[-1] % group_size != 0:
-        pad_size = group_size - (w_sorted.shape[-1] % group_size)
-        w_sorted = torch.nn.functional.pad(w_sorted, (0, pad_size))
-        original_indices = torch.nn.functional.pad(original_indices, (0, pad_size))
+    # Sort columns by their argmax index
+    sorted_indices = torch.argsort(col_max_idx)
+    # Keep track of original indices for reordering back
+    original_indices = torch.arange(in_features, device=w.device)
+    
+    # Apply the sorting
+    w = w[:, sorted_indices]
+    original_indices = original_indices[sorted_indices]
 
-    # Reshape to group dimension
-    w_grouped = w_sorted.view(w_sorted.shape[0], num_groups, group_size)
-    original_indices_grouped = original_indices.view(original_indices.shape[0], num_groups, group_size)
+    # 2. Pad if needed
+    num_groups = (w.shape[1] + group_size - 1) // group_size
+    if w.shape[1] % group_size != 0:
+        pad_size = group_size - (w.shape[1] % group_size)
+        # Pad zeros at the end (right side) of the last dimension
+        w = torch.nn.functional.pad(w, (0, pad_size))
+    else:
+        pad_size = 0
 
-    # Compute scales per group using the grouped tensor
+    # 3. Reshape to group dimension for quantization
+    w_grouped = w.view(out_features, num_groups, group_size)
+
+    # Compute scales per group
     scales = w_grouped.abs().max(dim=-1, keepdim=True)[0]
     q_max = 2 ** (n_bits - 1) - 1
     scales.clamp_(min=1e-5).div_(q_max)
 
     # Quantize each group
-    quantized = w_grouped.div_(scales).round_().mul_(scales)
+    w_grouped.div_(scales).round_().mul_(scales)
 
-    # Reshape back and remove padding
-    quantized = quantized.view(w_shape[0], -1)[:, :w_shape[1]]
-    
-    # Create the final output tensor using the original indices
-    output = torch.empty_like(w)
-    for i in range(original_indices.shape[0]):
-        for j in range(original_indices.shape[1]):
-            if original_indices_grouped[i, j] < w.shape[-1]:  # Check for valid index
-                output[i, original_indices_grouped[i, j]] = quantized[i, j]
+    # 4. Reshape back and remove padding
+    w = w_grouped.view(out_features, -1)
+    if pad_size > 0:
+        # Remove the padding columns we added
+        w = w[:, :in_features]
 
-    return output
+    # 5. Reorder columns back to original ordering
+    # original_indices currently holds the permutation applied earlier.
+    # We now find the inverse permutation to restore the original order.
+    inverse_permutation = torch.argsort(original_indices)
+    w = w[:, inverse_permutation]
+
+    return w
 
 class W4A4Linear(nn.Module):
     def __init__(
@@ -205,7 +252,7 @@ class W4A4Linear(nn.Module):
             self.act_quant = partial(quantize_activation_per_tensor_absmax, n_bits=quant_bits)
         elif act_quant == "per_group":
             self.act_quant_name = "per_group"
-            self.act_quant = partial(quantize_activation_per_group_absmax, n_bits=quant_bits, group_size=group_size)
+            self.act_quant = partial(quantize_activation_per_group_absmax_sort, n_bits=quant_bits, group_size=group_size)
         else:
             raise ValueError(f"Invalid act_quant: {act_quant}")
 
@@ -308,7 +355,7 @@ class W4A4Linear(nn.Module):
                 module.weight, n_bits=quant_bits
             )
         elif weight_quant == "per_group":
-            new_module.weight = quantize_weight_per_group_absmax(
+            new_module.weight = quantize_weight_per_group_absmax_sort(
                 module.weight, n_bits=quant_bits, group_size=group_size
             )
         else:
