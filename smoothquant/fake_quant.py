@@ -108,13 +108,14 @@ def quantize_activation_per_group_absmax_sort(t, n_bits, group_size=128):
     t = t.view(-1, t_shape[-1])
     N, C = t.shape
 
-    # 1. Compute sorting indices based on max across the first dimension (N)
-    #    For each column (channel), find its max absolute value
-    std, mean = t.abs().std_mean(dim=0)  # shape: [C]
+     # 1. Compute sorting key (mean+3*std) for each column (channel)
+    t_abs = t.abs()
+    col_means = t_abs.mean(dim=0)   
+    col_stds = t_abs.std(dim=0, unbiased=False)
+    sort_keys = col_means + 3 * col_stds
 
-    # Sort columns by their argmax value
-    sorted_indices = torch.argsort(mean + 3* std)
-    # Keep track of original indices for reordering
+    # Sort columns by this metric
+    sorted_indices = torch.argsort(sort_keys)
     original_indices = torch.arange(C, device=t.device)
 
     # Apply the sorting
@@ -160,12 +161,15 @@ def quantize_weight_per_group_absmax_sort(w, n_bits, group_size=128):
     w_shape = w.shape
     out_features, in_features = w_shape[0], w_shape[1]
 
-    # 1. Compute sorting indices based on max across output dimension
-    #    For each input channel (column), find its max absolute value
-    std, mean = w.abs().std_mean(dim=0)  # shape: [C]
+   # 1. Compute sorting key based on mean+3*std for each column
+    #    Use the absolute values of each column, compute mean and std.
+    w_abs = w.abs()
+    col_means = w_abs.mean(dim=0)   # shape: [in_features]
+    col_stds = w_abs.std(dim=0, unbiased=False)  # shape: [in_features]
+    sort_keys = col_means + 3 * col_stds
 
-    # Sort columns by their argmax value
-    sorted_indices = torch.argsort(mean + 3* std)
+    # Sort columns by this metric
+    sorted_indices = torch.argsort(sort_keys)
     # Keep track of original indices for reordering back
     original_indices = torch.arange(in_features, device=w.device)
     
