@@ -162,7 +162,7 @@ def quantize_weight_per_group_absmax_sort(w, n_bits, group_size=128):
 
     # 1. Compute sorting indices based on max across output dimension
     #    For each input channel (column), find its max absolute value
-    std, mean = t.abs().std_mean(dim=0)  # shape: [C]
+    std, mean = w.abs().std_mean(dim=0)  # shape: [C]
 
     # Sort columns by their argmax value
     sorted_indices = torch.argsort(mean + 3* std)
