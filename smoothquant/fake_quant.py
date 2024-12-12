@@ -109,11 +109,11 @@ def quantize_activation_per_group_absmax_sort(t, n_bits, group_size=128):
     N, C = t.shape
 
     # 1. Compute sorting indices based on max across the first dimension (N)
-    #    For each column (channel), find the row index of its max absolute value
+    #    For each column (channel), find its max absolute value
     col_max_val = t.abs().max(dim=0)  # shape: [C]
 
-    # Sort columns by their argmax index
-    sorted_indices = torch.argsort(col_max_val)
+    # Sort columns by their argmax value
+    sorted_indices = torch.argsort(col_max_val, descending = True)
     # Keep track of original indices for reordering
     original_indices = torch.arange(C, device=t.device)
 
@@ -161,11 +161,11 @@ def quantize_weight_per_group_absmax_sort(w, n_bits, group_size=128):
     out_features, in_features = w_shape[0], w_shape[1]
 
     # 1. Compute sorting indices based on max across output dimension
-    #    For each input channel (column), find the row index of its max absolute value
+    #    For each input channel (column), find its max absolute value
     col_max_val = w.abs().max(dim=0)  # shape: [in_features]
     
-    # Sort columns by their argmax index
-    sorted_indices = torch.argsort(col_max_val)
+    # Sort columns by their argmax value
+    sorted_indices = torch.argsort(col_max_val, descending = True)
     # Keep track of original indices for reordering back
     original_indices = torch.arange(in_features, device=w.device)
     
