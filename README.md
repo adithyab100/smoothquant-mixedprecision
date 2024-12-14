@@ -1,4 +1,4 @@
-## Mixed Precision and Group Quantization for LLM
+## W4A4 MixedQuant
 Adithya Balachandran, Andi Liu, Ningshan Ma, Amber Wang, Jonathan Zhou
 
 This is the final project for class 6.5940 (Fa 24).
