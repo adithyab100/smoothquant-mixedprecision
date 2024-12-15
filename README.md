@@ -5,9 +5,7 @@ This repository implements W4A4 MixedQuant, a novel quantization approach that e
 
 ## Quick Start
 
-### Running Experiments
-
-Two options:
+Two options to run the experiments:
 
 1. Run all experiments: `./run.sh`
 2. Interactive notebooks:
