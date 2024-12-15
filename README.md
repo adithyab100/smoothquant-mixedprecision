@@ -1,38 +1,86 @@
-## W4A4 MixedQuant
-Adithya Balachandran, Andi Liu, Ningshan Ma, Amber Wang, Jonathan Zhou
+# W4A4 MixedQuant: Mixed Precision and Group Quantization for LLM Compression
 
-This is the final project for class 6.5940 (Fa 24).
+This repository implements W4A4 MixedQuant, a novel quantization approach that enables 4-bit quantization for both weights and activations while maintaining model accuracy. Our method combines mixed-precision preservation with sorted group quantization to achieve significant model compression with minimal performance degradation.
 
-You can run the experiments by running `run.sh` or by running `examples/smoothquant_llama_demo.ipynb`. A GPU with high memory is needed to run the LLaMa model (T4 in Google Colab won't do, you'll need something like A100).
+## Quick Start
 
-# Introduction
+### Requirements
 
-## Background
-Large language models (LLMs) demand
-substantial computational and memory resources. In
-recent years, the model size of LLMs is developing at a
-faster pace than GPU memory, increasing the need for
-effective model compression techniques.
+### Running Experiments
 
-## Current Solutions:
-1. Activation-aware weight quantization: W4A16 quantization by preserving salient weights
-•Higher precision activations still remain a bottleneck
-for computational performance
-2. SmoothQuant: pre-smooths activations before quantization to achieve W8A8 quantization
-•Loses 4-bit weight quantization of AWQ
-We propose W4A4 MixedQuant, a quantization
-method that performs 4-bit quantization for most
-weights and corresponding activations, while preserving the remaining weights and activations. 
+Two options:
 
-## Main Contributions:
-- Preserve salient weights and activations (mixed-pre-
-cision approach) to maintain accuracy, which will be
-measured by perplexity.
-- Leverage group quantization to preserve more infor-
-mation in the 4-bit weights/activations.
--  Sorts and groups channels with similar magnitude ranges together, which can improve quantization accuracy since each group's scaling factor will be more appropriate for all channels within that group.
-•Achieve a perplexity that within 0.5 the original
-perplexity of the FP16 model.
+1. Run all experiments: `./run.sh`
+2. Interactive notebooks:
+    - `examples/smoothquant_llama_demo.ipynb`: Main demo notebook
 
+Requires high-memory GPU (A100 recommended, T4 insufficient for LLaMA models)
 
-## Experimental Results
+## Method Overview
+
+Our approach addresses limitations of existing methods through three key innovations:
+
+1. **Mixed-Precision Preservation**
+
+    - Identifies and preserves 5-10% of salient channels in FP16
+    - Quantizes remaining channels to INT4
+    - Maintains critical information while reducing overall size
+
+2. **Group Quantization**
+
+    - Divides channels into groups (typically 64-128)
+    - Applies quantization independently to each group
+    - Balances compression and accuracy
+
+3. **Channel Sorting Strategies**
+    - Maximum value sorting
+    - Statistical sorting (mean + 3\*STD)
+    - Position-based sorting (argmax)
+
+## Key Results
+
+### OPT-1.3B
+
+-   Maintains perplexity below 20 for all tested group sizes with 5-10% salient weights
+-   Significant size reduction while preserving model performance
+
+### Llama-2-7B
+
+-   Model size reduced from ~12852 MiB to ~8193 MiB with 10% salient proportion
+-   Perplexity increase of only 0.07 (5.8919 vs 5.823 FP16)
+-   With 5% salient proportion and group size 64: halved model size with <0.3 perplexity increase
+
+### Channel Sorting Impact
+
+-   Max value and mean+3STD sorting significantly improve perplexity for large group sizes
+-   Example: At group size 1024, perplexity improved from 59.98 (unsorted) to 19.56 (max sorting)
+
+## Repository Structure
+
+```python
+smoothquant-mixedprecision/
+├── run.sh
+├── examples/                  # Demo notebooks
+├── smoothquant/              # Core implementation
+│   ├── fake_quant.py         # Quantization implementations
+├── run_experiments/          # Experiment scripts
+└── figures/                  # Generated plots and results
+```
+
+## Citation
+
+```bibtex
+@article{balachandran2024mixedquant,
+  title={MixedQuant: Mixed Precision and Group Quantization for LLM Compression},
+  author={Balachandran, Adithya and Liu, Andi and Ma, Ningshan and Wang, Amber and Zhou, Jonathan},
+  year={2024}
+}
+```
+
+## Acknowledgements
+
+This project was supported by the MIT Han Lab and MIT 6.5940: TinyML and Efficient Deep Learning Computing.
+
+## License
+
+MIT License
