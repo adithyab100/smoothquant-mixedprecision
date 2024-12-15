@@ -5,8 +5,6 @@ This repository implements W4A4 MixedQuant, a novel quantization approach that e
 
 ## Quick Start
 
-### Requirements
-
 ### Running Experiments
 
 Two options:
