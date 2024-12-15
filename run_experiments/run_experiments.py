@@ -100,17 +100,22 @@ class Evaluator:
     def evaluate(self, model):
         model.eval()
         nlls = []
-        n_samples = self.n_samples if self.n_samples else self.dataset.size(
-            1) // 2048
-        for i in tqdm.tqdm(range(n_samples), desc="Evaluating..."):
-            batch = self.dataset[:, (i * self.batch_size): ((i + 1) * self.batch_size)].to(model.device)
+        n_samples = self.n_samples if self.n_samples else self.dataset.size(1) // 2048
+        
+        # Use tqdm.tqdm() with position=0 and leave=True for proper progress bar
+        for i in tqdm.tqdm(range(n_samples), desc="Evaluating", 
+                          position=0, leave=True, ncols=100):
+            batch = self.dataset[:, (i * self.batch_size): 
+                               ((i + 1) * self.batch_size)].to(model.device)
             with torch.no_grad():
                 lm_logits = model(batch).logits
             shift_logits = lm_logits[:, :-1, :].contiguous().float()
-            shift_labels = self.dataset[:, (i * self.batch_size): ((i + 1) * self.batch_size)][:, 1:]
+            shift_labels = self.dataset[:, (i * self.batch_size): 
+                                      ((i + 1) * self.batch_size)][:, 1:]
             loss_fct = nn.CrossEntropyLoss()
             loss = loss_fct(
-                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+                shift_logits.view(-1, shift_logits.size(-1)), 
+                shift_labels.view(-1)
             )
             neg_log_likelihood = loss.float() * self.batch_size
             nlls.append(neg_log_likelihood)
@@ -213,7 +218,8 @@ def plot_results(results, group_sizes, model_name, output_folder="figures"):
     plt.grid(True, which='both', linestyle='--', linewidth=0.5, alpha=0.7)
     plt.legend(title="Salient Proportion", loc='upper left')
     plt.tight_layout()
-    plt.savefig(f"{output_folder}/{model_name.split('/')[-1]}_ppl_vs_group_size.png")
+    ppl_path = f"{output_folder}/{model_name.split('/')[-1]}_ppl_vs_group_size.png"
+    plt.savefig(ppl_path)
     plt.close()
     
     # Plot model size
@@ -238,8 +244,13 @@ def plot_results(results, group_sizes, model_name, output_folder="figures"):
     plt.grid(True, which='both', linestyle='--', linewidth=0.5, alpha=0.7)
     plt.legend(title="Salient Proportion", loc='upper left')
     plt.tight_layout()
-    plt.savefig(f"{output_folder}/{model_name.split('/')[-1]}_size_vs_group_size.png")
+    size_path = f"{output_folder}/{model_name.split('/')[-1]}_size_vs_group_size.png"
+    plt.savefig(size_path)
     plt.close()
+    
+    print(f"\nFigures saved at:")
+    print(f"- Perplexity plot: {os.path.abspath(ppl_path)}")
+    print(f"- Model size plot: {os.path.abspath(size_path)}")
 
 # Run experiments for both models
 if __name__ == "__main__":
