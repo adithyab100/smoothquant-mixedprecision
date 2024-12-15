@@ -3,6 +3,8 @@ Adithya Balachandran, Andi Liu, Ningshan Ma, Amber Wang, Jonathan Zhou
 
 This is the final project for class 6.5940 (Fa 24).
 
+You can run the experiments by running `run.sh` or by running `examples/smoothquant_llama_demo.ipynb`. A GPU with high memory is needed to run the LLaMa model (T4 in Google Colab won't do, you'll need something like A100).
+
 # Introduction
 
 ## Background
