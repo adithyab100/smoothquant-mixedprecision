@@ -1,4 +1,5 @@
 # W4A4 MixedQuant: Mixed Precision and Group Quantization for LLM Compression
+Adithya Balachandran, Andi Liu, Ningshan Ma, Amber Wang and Jonathan Zhou
 
 This repository implements W4A4 MixedQuant, a novel quantization approach that enables 4-bit quantization for both weights and activations while maintaining model accuracy. Our method combines mixed-precision preservation with sorted group quantization to achieve significant model compression with minimal performance degradation.
 
@@ -13,6 +14,8 @@ Two options:
 1. Run all experiments: `./run.sh`
 2. Interactive notebooks:
     - `examples/smoothquant_llama_demo.ipynb`: Main demo notebook
+    - `examples/smoothquant_opt_demo.ipynb`: OPT-1.3B experiments
+
 
 Requires high-memory GPU (A100 recommended, T4 insufficient for LLaMA models)
 
@@ -60,21 +63,11 @@ Our approach addresses limitations of existing methods through three key innovat
 ```python
 smoothquant-mixedprecision/
 ├── run.sh
-├── examples/                  # Demo notebooks
+├── examples/                 # Demo notebooks
 ├── smoothquant/              # Core implementation
 │   ├── fake_quant.py         # Quantization implementations
 ├── run_experiments/          # Experiment scripts
-└── figures/                  # Generated plots and results
-```
-
-## Citation
-
-```bibtex
-@article{balachandran2024mixedquant,
-  title={MixedQuant: Mixed Precision and Group Quantization for LLM Compression},
-  author={Balachandran, Adithya and Liu, Andi and Ma, Ningshan and Wang, Amber and Zhou, Jonathan},
-  year={2024}
-}
+└── figures/                  # Generated plots and results if you run the experiments
 ```
 
 ## Acknowledgements
