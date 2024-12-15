@@ -27,6 +27,62 @@ KiB = 1024 * Byte
 MiB = 1024 * KiB
 GiB = 1024 * MiB
 
+def get_calib_dataset(tokenizer=None, n_samples=256, block_size=512):
+    dataset = load_dataset('wikitext', 'wikitext-2-raw-v1', split="validation")
+    dataset = dataset.shuffle(seed=42)
+    samples = []
+    n_run = 0
+    for data in dataset:
+        line = data["text"]
+        line = line.strip()
+        line_encoded = tokenizer.encode(line)
+        if len(line_encoded) > block_size:
+            continue
+        sample = torch.tensor([line_encoded])
+        if sample.numel() == 0:
+            continue
+        samples.append(sample)
+        n_run += 1
+        if n_run == n_samples:
+            break
+
+    # now concatenate all samples and split according to block size
+    cat_samples = torch.cat(samples, dim=1)
+    n_split = cat_samples.shape[1] // block_size
+    print(f" * Split into {n_split} blocks")
+    return [cat_samples[:, i*block_size:(i+1)*block_size] for i in range(n_split)]
+
+def get_calib_feat(model, tokenizer):
+    input_dict = dict()
+    def stat_input_max_hook(m, x, y, name):
+        if isinstance(x, tuple):
+            x = x[0]
+        x_max = x.view(-1, x.shape[-1]).abs().mean(dim=0).cpu().detach()
+        if name not in input_dict:
+            input_dict[name] = [x_max]
+        else:
+            input_dict[name] += [x_max]
+
+    hooks = []
+    for name, m in model.named_modules():
+        if isinstance(m, nn.Linear):
+            hooks.append(
+                m.register_forward_hook(
+                    partial(stat_input_max_hook, name=name)))
+
+    print("Collecting activation scales...")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    samples = get_calib_dataset(tokenizer)
+    pbar = tqdm.tqdm(samples)
+    for input_ids in pbar:
+        input_ids = input_ids.to(device)
+        model(input_ids)
+
+    for hook in hooks:
+        hook.remove()
+    return input_dict
+
 class Evaluator:
     def __init__(self, dataset, tokenizer, device, n_samples=10, batch_size=2048):
         self.dataset = dataset
@@ -54,60 +110,12 @@ class Evaluator:
             shift_labels = self.dataset[:, (i * self.batch_size): ((i + 1) * self.batch_size)][:, 1:]
             loss_fct = nn.CrossEntropyLoss()
             loss = loss_fct(
-                shift_logits.view(-1, shift_logits.size(-1)
-                                  ), shift_labels.view(-1)
+                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
             )
             neg_log_likelihood = loss.float() * self.batch_size
             nlls.append(neg_log_likelihood)
 
         return torch.exp(torch.stack(nlls).sum() / (n_samples * self.batch_size))
-
-def get_calib_feat(model, tokenizer, n_samples=128, block_size=512):
-    """Get calibration features for the model using a sample dataset."""
-    dataset = load_dataset('wikitext', 'wikitext-2-raw-v1', split="validation")
-    dataset = dataset.shuffle(seed=42)
-    samples = []
-    n_run = 0
-    
-    # Process and pad samples to the same length
-    for data in dataset:
-        line = data["text"]
-        line = line.strip()
-        line_encoded = tokenizer.encode(line)
-        if len(line_encoded) > block_size:
-            continue
-        # Pad sequence to block_size
-        if len(line_encoded) < block_size:
-            line_encoded = line_encoded + [tokenizer.pad_token_id] * (block_size - len(line_encoded))
-        sample = torch.tensor([line_encoded])
-        if sample.numel() == 0:
-            continue
-        samples.append(sample)
-        n_run += 1
-        if n_run >= n_samples:
-            break
-    
-    if len(samples) == 0:
-        raise ValueError("No valid samples found for calibration")
-    
-    # Stack all samples into a single batch
-    samples = torch.cat(samples, dim=0)
-    
-    # Prepare input features
-    model.eval()
-    input_feat = {}
-    
-    with torch.no_grad():
-        # Process the entire batch at once
-        samples = samples.to(model.device)
-        out = model(samples, output_hidden_states=True)
-        hidden_states = out.hidden_states
-        
-        # Store each hidden state
-        for idx, hidden in enumerate(hidden_states):
-            input_feat[idx] = hidden
-    
-    return input_feat
 
 def run_experiments(model_name, group_sizes=[4, 8, 16, 32, 64, 128, 256, 512, 1024], 
                    salient_props=[0, 0.01, 0.05, 0.1], device="cuda"):
@@ -137,7 +145,7 @@ def run_experiments(model_name, group_sizes=[4, 8, 16, 32, 64, 128, 256, 512, 10
                 quantize_fn = quantize_llama_like
             else:  # OPT model
                 model_fp16 = AutoModelForCausalLM.from_pretrained(
-                    model_name, torch_dtype=torch.float16, device_map="auto"
+                    model_name, device_map="auto"
                 )
                 tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
                 quantize_fn = quantize_opt
@@ -152,7 +160,6 @@ def run_experiments(model_name, group_sizes=[4, 8, 16, 32, 64, 128, 256, 512, 10
                 act_quant="per_group",
                 input_feat=input_feat,
                 salient_prop=salient_prop,
-                quant_bits=4,
                 group_size=group_size
             )
             
@@ -163,10 +170,8 @@ def run_experiments(model_name, group_sizes=[4, 8, 16, 32, 64, 128, 256, 512, 10
             perplexities.append(ppl.item())
             
             # Calculate model size
-            model_size = get_model_size(model_w4a4, data_width=4, 
-                                      salient_prop=salient_prop, 
-                                      group_size=group_size) / MiB
-            model_sizes.append(model_size)
+            model_size = get_model_size(model_w4a4, data_width=4, group_size=group_size)
+            model_sizes.append(model_size / MiB)  # Convert to MiB
             
             # Clear memory
             del model_fp16
@@ -179,14 +184,11 @@ def run_experiments(model_name, group_sizes=[4, 8, 16, 32, 64, 128, 256, 512, 10
     
     return results, group_sizes
 
-def plot_results(results, group_sizes, model_name, output_folder="./figures"):
-    """Plot perplexity and model size results."""
-    # Create output folder if it doesn't exist
+def plot_results(results, group_sizes, model_name, output_folder="figures"):
     os.makedirs(output_folder, exist_ok=True)
     
-    # Plot settings
-    markers = itertools.cycle(['o', 's', '^', 'd'])
-    colors = itertools.cycle(['darkblue', 'mediumseagreen', 'orange', 'darkviolet'])
+    markers = itertools.cycle(['o', 's', '^', 'D'])
+    colors = itertools.cycle(['blue', 'green', 'orange', 'purple'])
     linestyles = itertools.cycle(['-', '--', '-.', ':'])
     
     # Plot perplexity
